@@ -27,6 +27,7 @@ jobs:
         CHROME_VERSION=$(google-chrome --version | grep -oP "\d+\.\d+\.\d+")
         wget -N https://storage.googleapis.com/chrome-for-testing-public/130.0.6723.91/linux64/chromedriver-linux64.zip || exit 1
         unzip chromedriver-linux64.zip -d /usr/local/bin/
+        ls /usr/local/bin/
         
     - name: Install Python dependencies
       run: |
