@@ -18,7 +18,8 @@ options.add_argument("--disable-extensions")
 options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.88 Safari/537.36")
 options.add_argument("--headless")  # 无头模式，后台运行
 driver_path = "/usr/local/bin/chromedriver-linux64/chromedriver"
-driver = webdriver.Chrome(executable_path=driver_path, options=options)
+service = Service(driver_path)
+driver = webdriver.Chrome(service=service, options=options)
 
 def fetch_discounted_products():
     url = "https://www.patagonia.jp/shop/web-specials"
