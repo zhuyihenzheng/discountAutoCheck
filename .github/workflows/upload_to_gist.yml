@@ -2,7 +2,7 @@ name: Upload Discounted Products to Gist
 
 on:
   schedule:
-    - cron: "8 3 * * *"  # 每天 UTC 零点运行
+    - cron: "14 15 * * *"  # 每天 UTC 零点运行
 
 jobs:
   upload:
