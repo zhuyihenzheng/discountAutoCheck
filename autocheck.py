@@ -51,7 +51,7 @@ def fetch_discounted_products():
 
     # 持续点击 "さらに見る" 按钮直到按钮不再显示
     scroll_count = 0
-    while False:
+    while TRUE:
         try:
             # 查找 "さらに見る" 按钮并点击
             # load_more_button = driver.find_element(
