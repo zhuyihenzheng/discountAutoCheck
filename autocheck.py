@@ -139,19 +139,6 @@ def fetch_discounted_products():
         <p class="timestamp">Generated on: {execution_time}</p>
     """
 
-for product in products:
-    html_content += f"""
-    <div class="product">
-        <h2>{product['name']}</h2>
-        <a href="{product['product_link']}" target="_blank">
-            <img src="{product['image_url']}" alt="{product['name']}">
-        </a>
-        <p class="original-price">Original Price: {product['original_price']}</p>
-        <p class="price">Sale Price: {product['sale_price']}</p>
-        <p>Discount Percent: {product['discount_percent']}%</p>
-    </div>
-    """
-
     for product in products:
         html_content += f"""
         <div class="product">
