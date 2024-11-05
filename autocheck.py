@@ -116,27 +116,41 @@ def fetch_discounted_products():
 
     execution_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    # 生成 HTML 内容
     html_content = f"""
-        <!DOCTYPE html>
-        <html lang="ja">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Patagonia Discounted Products</title>
-            <p class="timestamp">Generated on: {execution_time}</p>
-            <style>
-                body { font-family: Arial, sans-serif; }
-                .product { border: 1px solid #ddd; padding: 10px; margin: 10px 0; }
-                .product img { max-width: 200px; }
-                .product h2 { font-size: 1.2em; color: #333; }
-                .price { font-weight: bold; color: #d9534f; }
-                .original-price { text-decoration: line-through; color: #888; }
-            </style>
-        </head>
-        <body>
-            <h1>Discounted Products</h1>
-            <p class="timestamp">Generated on: {execution_time}</p>
-        """
+    <!DOCTYPE html>
+    <html lang="ja">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Patagonia Discounted Products</title>
+        <style>
+            body {{ font-family: Arial, sans-serif; }}
+            .product {{ border: 1px solid #ddd; padding: 10px; margin: 10px 0; }}
+            .product img {{ max-width: 200px; }}
+            .product h2 {{ font-size: 1.2em; color: #333; }}
+            .price {{ font-weight: bold; color: #d9534f; }}
+            .original-price {{ text-decoration: line-through; color: #888; }}
+            .timestamp {{ color: #555; font-size: 0.9em; margin-top: 10px; }}
+        </style>
+    </head>
+    <body>
+        <h1>Discounted Products</h1>
+        <p class="timestamp">Generated on: {execution_time}</p>
+    """
+
+for product in products:
+    html_content += f"""
+    <div class="product">
+        <h2>{product['name']}</h2>
+        <a href="{product['product_link']}" target="_blank">
+            <img src="{product['image_url']}" alt="{product['name']}">
+        </a>
+        <p class="original-price">Original Price: {product['original_price']}</p>
+        <p class="price">Sale Price: {product['sale_price']}</p>
+        <p>Discount Percent: {product['discount_percent']}%</p>
+    </div>
+    """
 
     for product in products:
         html_content += f"""
