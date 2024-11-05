@@ -7,6 +7,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 import time
 from datetime import datetime
+import pytz
 import os
 
 # 配置 Chrome 浏览器选项
@@ -114,7 +115,9 @@ def fetch_discounted_products():
     
     driver.quit()
 
-    execution_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    utc_now = datetime.utcnow()
+    jst = pytz.timezone("Asia/Tokyo")
+    execution_time = utc_now.astimezone(jst).strftime("%Y-%m-%d %H:%M:%S")
 
     # 生成 HTML 内容
     html_content = f"""
