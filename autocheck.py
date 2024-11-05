@@ -51,7 +51,7 @@ def fetch_discounted_products():
 
     # 持续点击 "さらに見る" 按钮直到按钮不再显示
     scroll_count = 0
-    while True:
+    while False:
         try:
             # 查找 "さらに見る" 按钮并点击
             # load_more_button = driver.find_element(
@@ -83,10 +83,11 @@ def fetch_discounted_products():
             # 只选取折扣超过30%的商品
             if discount_percent > 30:
                 # 原价
-                original_price = item.find_element(By.CLASS_NAME, "strike-through").text.strip()
-                
+                # original_price = item.find_element(By.CLASS_NAME, "strike-through").text.strip()
+                original_price = item.find_element(By.CSS_SELECTOR, "span.strike-through.list .value").text.strip()
                 # 折后价
-                sale_price = item.find_element(By.CLASS_NAME, "sales").text.strip()
+                # sale_price = item.find_element(By.CLASS_NAME, "sales").text.strip()
+                sale_price = item.find_element(By.CSS_SELECTOR, "span.sales.text-sales-price .value").text.strip()
                 
                 # 图片 URL
                 image_url = item.find_element(By.CSS_SELECTOR, "meta[itemprop='image']").get_attribute("content")
