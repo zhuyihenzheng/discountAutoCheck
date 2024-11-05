@@ -6,6 +6,7 @@ from selenium.common.exceptions import NoSuchElementException, TimeoutException
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 import time
+from datetime import datetime
 import os
 
 # 配置 Chrome 浏览器选项
@@ -106,12 +107,14 @@ def fetch_discounted_products():
                     "sale_price": sale_price,
                     "discount_percent": discount_percent,
                     "image_url": image_url,
-                    "product_link": "https://www.patagonia.jp" + product_link
+                    "product_link": product_link
                 })
         except Exception as e:
             print(f"Error processing item: {e}")
     
     driver.quit()
+
+    execution_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     html_content = """
     <!DOCTYPE html>
@@ -120,6 +123,7 @@ def fetch_discounted_products():
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Patagonia Discounted Products</title>
+        <p class="timestamp">Generated on: {execution_time}</p>
         <style>
             body { font-family: Arial, sans-serif; }
             .product { border: 1px solid #ddd; padding: 10px; margin: 10px 0; }
