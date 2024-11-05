@@ -95,13 +95,18 @@ def fetch_discounted_products():
                 # 产品名称
                 product_name = item.find_element(By.CLASS_NAME, "product-tile__name").text.strip()
 
+                # 商品链接
+                product_link_element = item.find_element(By.CSS_SELECTOR, "div.product-tile__cover a")
+                product_link = product_link_element.get_attribute("href")
+
                 # 将信息添加到列表中
                 products.append({
                     "name": product_name,
                     "original_price": original_price,
                     "sale_price": sale_price,
                     "discount_percent": discount_percent,
-                    "image_url": image_url
+                    "image_url": image_url，
+                    "product_link": "https://www.patagonia.jp" + product_link
                 })
         except Exception as e:
             print(f"Error processing item: {e}")
@@ -132,7 +137,9 @@ def fetch_discounted_products():
         html_content += f"""
         <div class="product">
             <h2>{product['name']}</h2>
-            <img src="{product['image_url']}" alt="{product['name']}">
+            <a href="{product['product_link']}" target="_blank">
+                <img src="{product['image_url']}" alt="{product['name']}">
+            </a>
             <p class="original-price">Original Price: {product['original_price']}</p>
             <p class="price">Sale Price: {product['sale_price']}</p>
             <p>Discount Percent: {product['discount_percent']}%</p>
