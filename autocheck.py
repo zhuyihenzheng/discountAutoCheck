@@ -86,10 +86,9 @@ def fetch_discounted_products():
             if discount_percent > 30:
                 # 原价
                 # original_price = item.find_element(By.CLASS_NAME, "strike-through").text.strip()
-                original_price = item.find_element(By.CSS_SELECTOR, "span.strike-through.list .value").text.strip()
+                original_price = item.find_element(By.XPATH, ".//span[contains(@class, 'strike-through')]/span[contains(@class, 'value')]").get_attribute("content")
                 # 折后价
-                # sale_price = item.find_element(By.CLASS_NAME, "sales").text.strip()
-                sale_price = item.find_element(By.CSS_SELECTOR, "span.sales.text-sales-price .value").text.strip()
+                sale_price = item.find_element(By.XPATH, ".//span[contains(@class, 'sales')]/span[contains(@class, 'value')]").get_attribute("content")
                 
                 # 图片 URL
                 image_url = item.find_element(By.CSS_SELECTOR, "meta[itemprop='image']").get_attribute("content")
