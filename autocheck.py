@@ -105,7 +105,7 @@ def fetch_discounted_products():
                     "original_price": original_price,
                     "sale_price": sale_price,
                     "discount_percent": discount_percent,
-                    "image_url": image_url，
+                    "image_url": image_url,
                     "product_link": "https://www.patagonia.jp" + product_link
                 })
         except Exception as e:
