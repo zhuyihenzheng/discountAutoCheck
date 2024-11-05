@@ -135,6 +135,7 @@ def fetch_discounted_products():
     </head>
     <body>
         <h1>Discounted Products</h1>
+        <p class="timestamp">Generated on: {execution_time}</p>
     """
 
     for product in products:
