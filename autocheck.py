@@ -105,8 +105,9 @@ def fetch_discounted_products():
             sizes = []
             for size_element in size_elements:
                 size = size_element.get_attribute("data-size")
-                stock_status = "在庫あり" if "is-disabled" in size_element.get_attribute("class") else "在庫なし"
-                sizes.append(f"{size}: {stock_status}")
+                if "is-disabled" in size_element.get_attribute("class"):
+                    continue
+                sizes.append(f"{size}")
             
             # 将尺寸信息添加到产品字典中
             product["sizes"] = sizes
