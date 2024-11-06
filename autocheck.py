@@ -28,28 +28,6 @@ def fetch_discounted_products():
     url = "https://www.patagonia.jp/shop/web-specials"
     driver.get(url)
     time.sleep(4)  # 等待页面加载
-    # print(driver.page_source)
-
-    # # 记录当前商品数量
-    # prev_item_count = 0
-    # new_items_loaded = True
-    # scroll_count = 0
-    # # 滚动页面直到没有新的商品加载
-    # while new_items_loaded:
-    #     # 滚动页面到底部
-    #     driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-    #     time.sleep(5)  # 等待新商品加载
-    #     scroll_count = scroll_count + 1
-        
-    #     # 重新获取商品元素，检查是否有新商品加载
-    #     items = driver.find_elements(By.CLASS_NAME, "product-tile__inner")
-    #     current_item_count = len(items)
-        
-    #     # 如果商品数量不再增加，则停止滚动
-    #     if current_item_count == prev_item_count:
-    #         new_items_loaded = False
-    #     else:
-    #         prev_item_count = current_item_count  # 更新商品计数
 
     # 持续点击 "さらに見る" 按钮直到按钮不再显示
     scroll_count = 0
@@ -157,7 +135,7 @@ def fetch_discounted_products():
             .price {{ font-weight: bold; color: #d9534f; }}
             .original-price {{ text-decoration: line-through; color: #888; }}
             .timestamp {{ color: #555; font-size: 0.9em; margin-top: 10px; }}
-            .sizes { margin-top: 5px; color: #555; font-size: 0.9em; }
+            .sizes {{ margin-top: 5px; color: #555; font-size: 0.9em; }}
         </style>
     </head>
     <body>
