@@ -100,22 +100,6 @@ def fetch_discounted_products():
                 product_link_element = item.find_element(By.CSS_SELECTOR, "div.product-tile__cover a")
                 product_link = product_link_element.get_attribute("href")
 
-                # 获取详细页面的尺寸信息
-                driver.get(product_link)
-                time.sleep(2)  # 等待页面加载
-    
-                sizes = []
-                size_elements = []
-                # 等待带有 'pdp-size-select' 类的元素加载完成
-                size_elements = WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located((By.XPATH, "//label[contains(@class, 'pdp-size-select')]"))
-                )
-                #size_elements = driver.find_elements(By.CSS_SELECTOR, "label.pdp-size-select")
-                for size_element in size_elements:
-                    size = size_element.get_attribute("data-size")
-                    stock_status = "在庫あり" if "is-oos" not in size_element.get_attribute("class") else "在庫なし"
-                    sizes.append(f"{size}: {stock_status}")
-
                 # 将信息添加到列表中
                 products.append({
                     "name": product_name,
@@ -124,11 +108,33 @@ def fetch_discounted_products():
                     "discount_percent": discount_percent,
                     "image_url": image_url,
                     "product_link": product_link,
-                    "sizes": sizes
+                    "sizes": []
                 })
         except Exception as e:
             print(f"Error processing item: {e}")
-    
+
+    # 在详细页面抓取尺寸信息
+    for product in products:
+        try:
+            driver.get(product["product_link"])
+            time.sleep(2)  # 等待页面加载
+
+            # 等待尺寸信息加载完成
+            size_elements = WebDriverWait(driver, 10).until(
+                EC.presence_of_all_elements_located((By.CSS_SELECTOR, "label.pdp-size-select"))
+            )
+            
+            sizes = []
+            for size_element in size_elements:
+                size = size_element.get_attribute("data-size")
+                stock_status = "在庫あり" if "is-oos" not in size_element.get_attribute("class") else "在庫なし"
+                sizes.append(f"{size}: {stock_status}")
+            
+            # 将尺寸信息添加到产品字典中
+            product["sizes"] = sizes
+        except (TimeoutException, NoSuchElementException) as e:
+            print(f"Error fetching sizes for {product['name']}: {e}")
+
     driver.quit()
 
     utc_now = datetime.utcnow()
