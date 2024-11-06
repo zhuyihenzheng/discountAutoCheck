@@ -105,7 +105,7 @@ def fetch_discounted_products():
                 time.sleep(2)  # 等待页面加载
     
                 sizes = []
-                size_elements = driver.find_elements(By.CLASS_NAME, "pdp-size-select")
+                size_element = driver.find_element(By.XPATH, "//label[contains(@class, 'pdp-size-select')]")
                 for size_element in size_elements:
                     size = size_element.get_attribute("data-size")
                     stock_status = "在庫あり" if "is-oos" not in size_element.get_attribute("class") else "在庫なし"
