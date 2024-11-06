@@ -31,7 +31,7 @@ def fetch_discounted_products():
 
     # 持续点击 "さらに見る" 按钮直到按钮不再显示
     scroll_count = 0
-    while False:
+    while True:
         try:
             # 查找 "さらに見る" 按钮并点击
             # load_more_button = driver.find_element(
@@ -105,7 +105,7 @@ def fetch_discounted_products():
             sizes = []
             for size_element in size_elements:
                 size = size_element.get_attribute("data-size")
-                stock_status = "在庫あり" if "is-oos" not in size_element.get_attribute("class") else "在庫なし"
+                stock_status = "在庫あり" if "is-disabled" in size_element.get_attribute("class") else "在庫なし"
                 sizes.append(f"{size}: {stock_status}")
             
             # 将尺寸信息添加到产品字典中
