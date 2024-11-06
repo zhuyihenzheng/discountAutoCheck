@@ -100,6 +100,17 @@ def fetch_discounted_products():
                 product_link_element = item.find_element(By.CSS_SELECTOR, "div.product-tile__cover a")
                 product_link = product_link_element.get_attribute("href")
 
+                # 获取详细页面的尺寸信息
+                driver.get(product_link)
+                time.sleep(2)  # 等待页面加载
+    
+                sizes = []
+                size_elements = driver.find_elements(By.XPATH, "//label[contains(@class, 'pdp-size-select')]")
+                for size_element in size_elements:
+                    size = size_element.get_attribute("data-size")
+                    stock_status = "在庫あり" if "is-oos" not in size_element.get_attribute("class") else "在庫なし"
+                    sizes.append(f"{size}: {stock_status}")
+
                 # 将信息添加到列表中
                 products.append({
                     "name": product_name,
@@ -107,7 +118,8 @@ def fetch_discounted_products():
                     "sale_price": sale_price,
                     "discount_percent": discount_percent,
                     "image_url": image_url,
-                    "product_link": product_link
+                    "product_link": product_link,
+                    "sizes": sizes
                 })
         except Exception as e:
             print(f"Error processing item: {e}")
@@ -134,6 +146,7 @@ def fetch_discounted_products():
             .price {{ font-weight: bold; color: #d9534f; }}
             .original-price {{ text-decoration: line-through; color: #888; }}
             .timestamp {{ color: #555; font-size: 0.9em; margin-top: 10px; }}
+            .sizes { margin-top: 5px; color: #555; font-size: 0.9em; }
         </style>
     </head>
     <body>
@@ -151,6 +164,7 @@ def fetch_discounted_products():
             <p class="original-price">Original Price: {product['original_price']}</p>
             <p class="price">Sale Price: {product['sale_price']}</p>
             <p>Discount Percent: {product['discount_percent']}%</p>
+            <p class="sizes">Sizes: {" | ".join(product['sizes'])}</p>
         </div>
         """
 
