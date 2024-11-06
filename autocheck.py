@@ -105,7 +105,12 @@ def fetch_discounted_products():
                 time.sleep(2)  # 等待页面加载
     
                 sizes = []
-                size_elements = driver.find_elements(By.CSS_SELECTOR, "label.pdp-size-select")
+                size_elements = []
+                # 等待带有 'pdp-size-select' 类的元素加载完成
+                size_elements = WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.XPATH, "//label[contains(@class, 'pdp-size-select')]"))
+                )
+                #size_elements = driver.find_elements(By.CSS_SELECTOR, "label.pdp-size-select")
                 for size_element in size_elements:
                     size = size_element.get_attribute("data-size")
                     stock_status = "在庫あり" if "is-oos" not in size_element.get_attribute("class") else "在庫なし"
