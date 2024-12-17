@@ -203,7 +203,7 @@ def upload_to_gist(content):
             }
         }
         requests.post(url, headers=headers, json=payload)
-        print("New Gist created.")
+        print("New Gist created: " + url)
 
 # 获取商品数据并上传到 Gist
 html_content = fetch_discounted_products()
