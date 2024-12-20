@@ -44,6 +44,7 @@ def fetch_discounted_products():
             driver.execute_script("arguments[0].click();", load_more_button)
             scroll_count = scroll_count + 1
             time.sleep(3)  # 等待加载新商品
+            break
         except (NoSuchElementException, TimeoutException):
             # 如果按钮不存在，则退出循环
             print("No more 'さらに見る' button, all items loaded.")
@@ -171,6 +172,7 @@ def upload_to_gist(content):
     # 检查是否已有 Gist
     gist_id = None
     response = requests.get("https://api.github.com/gists", headers=headers)
+    print(response)
     if response.status_code == 200:
         gists = response.json()
         print(gists)
