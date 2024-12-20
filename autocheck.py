@@ -26,7 +26,7 @@ driver = webdriver.Chrome(service=service, options=options)
 
 def send_wechat_message(title, content):
     # 替换为你的 Server酱 SendKey
-    WECHAT_SENDKEY = os.getenv("WECHAT_SENDKEY")
+    send_key = os.getenv("WECHAT_SENDKEY")
     url = f"https://sctapi.ftqq.com/{send_key}.send"
     
     data = {
@@ -220,7 +220,7 @@ def upload_to_gist(content):
             }
         }
         requests.post(url, headers=headers, json=payload)
-        print("New Gist created: " + url)
+        print("New Gist created: ")
         # 测试推送
         send_wechat_message("提醒", "快去看！！！")
 
