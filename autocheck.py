@@ -167,13 +167,11 @@ def fetch_discounted_products():
 
 def upload_to_gist(content):
     GIST_TOKEN = os.getenv("GIST_TOKEN")
-    print(GIST_TOKEN)
     headers = {"Authorization": f"token {GIST_TOKEN}"}
 
     # 检查是否已有 Gist
     gist_id = None
     response = requests.get("https://api.github.com/gists", headers=headers)
-    print(response)
     if response.status_code == 200:
         gists = response.json()
         print(gists)
@@ -183,7 +181,6 @@ def upload_to_gist(content):
                 break
 
     # 创建或更新 Gist
-    print(gist_id)
     if gist_id:
         url = f"https://api.github.com/gists/{gist_id}"
         payload = {
