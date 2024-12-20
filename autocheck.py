@@ -189,7 +189,6 @@ def upload_to_gist(content):
     response = requests.get("https://api.github.com/gists", headers=headers)
     if response.status_code == 200:
         gists = response.json()
-        print(gists)
         for gist in gists:
             if gist["description"] == "Patagonia Discounted Products":
                 gist_id = gist["id"]
@@ -222,8 +221,9 @@ def upload_to_gist(content):
         requests.post(url, headers=headers, json=payload)
         print("New Gist created: ")
         # 测试推送
-        send_wechat_message("提醒", "快去看！！！")
+        
 
 # 获取商品数据并上传到 Gist
-html_content = fetch_discounted_products()
-upload_to_gist(html_content)
+#html_content = fetch_discounted_products()
+#upload_to_gist(html_content)
+send_wechat_message("提醒", "快去看！！！")
