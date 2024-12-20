@@ -24,6 +24,22 @@ driver_path = "/usr/local/bin/chromedriver-linux64/chromedriver"
 service = Service(driver_path)
 driver = webdriver.Chrome(service=service, options=options)
 
+def send_wechat_message(title, content):
+    # 替换为你的 Server酱 SendKey
+    WECHAT_SENDKEY = os.getenv("WECHAT_SENDKEY")
+    url = f"https://sctapi.ftqq.com/{send_key}.send"
+    
+    data = {
+        "title": title,       # 消息标题
+        "desp": content       # 消息内容
+    }
+    
+    response = requests.post(url, data=data)
+    if response.status_code == 200:
+        print("消息发送成功")
+    else:
+        print("消息发送失败:", response.text)
+
 def fetch_discounted_products():
     url = "https://www.patagonia.jp/shop/web-specials"
     driver.get(url)
@@ -209,3 +225,5 @@ def upload_to_gist(content):
 # 获取商品数据并上传到 Gist
 html_content = fetch_discounted_products()
 upload_to_gist(html_content)
+# 测试推送
+send_wechat_message("提醒", url)

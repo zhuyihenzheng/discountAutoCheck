@@ -39,4 +39,5 @@ jobs:
     - name: Run Python script to generate HTML and upload to Gist
       env:
         GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+        WECHAT_SENDKEY: ${{ secrets.WECHAT_SENDKEY }}
       run: python autocheck.py
