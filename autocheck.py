@@ -167,6 +167,7 @@ def fetch_discounted_products():
 
 def upload_to_gist(content):
     GIST_TOKEN = os.getenv("GIST_TOKEN")
+    print(GIST_TOKEN)
     headers = {"Authorization": f"token {GIST_TOKEN}"}
 
     # 检查是否已有 Gist
