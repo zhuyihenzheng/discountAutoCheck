@@ -173,12 +173,14 @@ def upload_to_gist(content):
     response = requests.get("https://api.github.com/gists", headers=headers)
     if response.status_code == 200:
         gists = response.json()
+        print(gists)
         for gist in gists:
             if gist["description"] == "Patagonia Discounted Products":
                 gist_id = gist["id"]
                 break
 
     # 创建或更新 Gist
+    print(gist_id)
     if gist_id:
         url = f"https://api.github.com/gists/{gist_id}"
         payload = {
