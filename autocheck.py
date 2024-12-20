@@ -224,6 +224,6 @@ def upload_to_gist(content):
         
 
 # 获取商品数据并上传到 Gist
-#html_content = fetch_discounted_products()
-#upload_to_gist(html_content)
+html_content = fetch_discounted_products()
+upload_to_gist(html_content)
 send_wechat_message("提醒", "快去看！！！")
