@@ -65,8 +65,9 @@ def fetch_all_ticket_dates():
                 )
 
                 for date_element in date_elements:
+                    date_text = date_element.text.strip()
                     ticket_data.append({
-                        "date": date_element.text.strip()
+                        "date": date_text
                     })
 
                 # 返回主页面
@@ -83,48 +84,18 @@ def fetch_all_ticket_dates():
 
     return ticket_data
 
-def upload_to_gist(content):
-    GIST_TOKEN = os.getenv("GIST_TOKEN")
-    headers = {"Authorization": f"token {GIST_TOKEN}"}
-
-    gist_id = None
-    response = requests.get("https://api.github.com/gists", headers=headers)
-    if response.status_code == 200:
-        gists = response.json()
-        for gist in gists:
-            if gist["description"] == "Trip Ticket Availability":
-                gist_id = gist["id"]
-                break
-
-    if gist_id:
-        url = f"https://api.github.com/gists/{gist_id}"
-        payload = {
-            "description": "Trip Ticket Availability",
-            "files": {
-                "trip_tickets.html": {
-                    "content": content
-                }
-            }
-        }
-        requests.patch(url, headers=headers, json=payload)
-        print("Gist updated.")
-    else:
-        url = "https://api.github.com/gists"
-        payload = {
-            "description": "Trip Ticket Availability",
-            "public": True,
-            "files": {
-                "trip_tickets.html": {
-                    "content": content
-                }
-            }
-        }
-        response = requests.post(url, headers=headers, json=payload)
-        print("New Gist created: ", response.json().get("html_url"))
-
 if __name__ == "__main__":
     tickets = fetch_all_ticket_dates()
     print("Fetched ticket data:", tickets)
+
+    # 检查 27, 28, 29 是否有余票
+    alert_dates = ["27", "28", "29"]
+    available_dates = [ticket["date"] for ticket in tickets if ticket["date"] in alert_dates]
+
+    if available_dates:
+        send_wechat_message("Trip Ticket Alert", f"以下日期有余票: {', '.join(available_dates)}")
+    else:
+        print("No tickets available for specified dates.")
 
     utc_now = datetime.utcnow()
     jst = pytz.timezone("Asia/Tokyo")
@@ -159,6 +130,3 @@ if __name__ == "__main__":
     </body>
     </html>
     """
-
-    upload_to_gist(html_content)
-    #send_wechat_message("Trip Ticket Update", "余票信息已更新！")
