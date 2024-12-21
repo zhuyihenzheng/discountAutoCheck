@@ -3,7 +3,7 @@ name: Upload Discounted Products to Gist
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 0 * * *"  # 每天 UTC 零点运行
+    - cron: "2 * * * *"  # 每天 UTC 零点运行
 
 jobs:
   upload:
