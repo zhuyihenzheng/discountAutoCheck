@@ -59,16 +59,14 @@ def fetch_all_ticket_dates():
                 driver.execute_script("arguments[0].click();", button)
                 time.sleep(3)  # 等待页面加载
 
-                # 查找日期和余票信息
+                # 查找日期信息
                 date_elements = WebDriverWait(driver, 10).until(
-                    EC.presence_of_all_elements_located((By.CSS_SELECTOR, "taro-text-core[style*='color: rgb(6, 174, 189)']"))
+                    EC.presence_of_all_elements_located((By.CSS_SELECTOR, "taro-text-core[style*='color: rgb(15, 41, 77)']"))
                 )
-                ticket_elements = driver.find_elements(By.CSS_SELECTOR, "taro-text-core[style*='color: rgb(245, 89, 74)']")
 
-                for date, ticket in zip(date_elements, ticket_elements):
+                for date_element in date_elements:
                     ticket_data.append({
-                        "date": date.text.strip(),
-                        "remaining_tickets": ticket.text.strip()
+                        "date": date_element.text.strip()
                     })
 
                 # 返回主页面
@@ -154,7 +152,6 @@ if __name__ == "__main__":
         html_content += f"""
         <div class="ticket">
             <p>Date: {ticket['date']}</p>
-            <p>Remaining Tickets: {ticket['remaining_tickets']}</p>
         </div>
         """
 
