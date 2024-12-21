@@ -1,4 +1,4 @@
-from selenium import webdriver
+@from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.common.exceptions import NoSuchElementException, TimeoutException
@@ -89,7 +89,7 @@ if __name__ == "__main__":
     print("Fetched ticket data:", tickets)
 
     # 检查 27, 28, 29 是否有余票
-    alert_dates = ["31","27", "28", "29"]
+    alert_dates = ["27", "28", "29"]
     available_dates = [ticket["date"] for ticket in tickets if ticket["date"] in alert_dates]
 
     if available_dates:
