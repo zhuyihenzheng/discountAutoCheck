@@ -40,7 +40,7 @@ def send_wechat_message(title, content):
     else:
         print("消息发送失败:", response.text)
 
-def fetch_trip_tickets():
+def fetch_all_ticket_dates():
     url = "https://jp.trip.com/travel-guide/attraction/xi-an/shaanxi-history-museum-75684?curr=JPY&locale=ja-JP"
     driver.get(url)
     time.sleep(4)  # 等待页面加载
@@ -48,30 +48,38 @@ def fetch_trip_tickets():
     ticket_data = []
 
     try:
-        # 查找包含余票信息的容器
-        ticket_blocks = WebDriverWait(driver, 10).until(
-            EC.presence_of_all_elements_located((By.CSS_SELECTOR, "taro-view-core.autoExpose"))
+        # 查找所有 "選択" 按钮
+        select_buttons = WebDriverWait(driver, 10).until(
+            EC.presence_of_all_elements_located((By.CSS_SELECTOR, "taro-view-core.hover_pointer"))
         )
 
-        for block in ticket_blocks:
+        for button in select_buttons:
             try:
-                # 获取日期信息
-                date_element = block.find_element(By.CSS_SELECTOR, "taro-text-core[style*='color: rgb(6, 174, 189)']")
-                date_text = date_element.text.strip()
+                # 点击按钮
+                driver.execute_script("arguments[0].click();", button)
+                time.sleep(3)  # 等待页面加载
 
-                # 获取余票信息
-                ticket_element = block.find_element(By.CSS_SELECTOR, "taro-text-core[style*='color: rgb(245, 89, 74)']")
-                ticket_text = ticket_element.text.strip()
+                # 查找日期和余票信息
+                date_elements = WebDriverWait(driver, 10).until(
+                    EC.presence_of_all_elements_located((By.CSS_SELECTOR, "taro-text-core[style*='color: rgb(6, 174, 189)']"))
+                )
+                ticket_elements = driver.find_elements(By.CSS_SELECTOR, "taro-text-core[style*='color: rgb(245, 89, 74)']")
 
-                ticket_data.append({
-                    "date": date_text,
-                    "remaining_tickets": ticket_text
-                })
-            except NoSuchElementException as e:
-                print(f"Error extracting data from block: {e}")
+                for date, ticket in zip(date_elements, ticket_elements):
+                    ticket_data.append({
+                        "date": date.text.strip(),
+                        "remaining_tickets": ticket.text.strip()
+                    })
+
+                # 返回主页面
+                driver.back()
+                time.sleep(3)
+
+            except Exception as e:
+                print(f"Error processing button: {e}")
 
     except TimeoutException:
-        print("Timeout while waiting for ticket information.")
+        print("Timeout while waiting for ticket buttons.")
     finally:
         driver.quit()
 
@@ -117,7 +125,7 @@ def upload_to_gist(content):
         print("New Gist created: ", response.json().get("html_url"))
 
 if __name__ == "__main__":
-    tickets = fetch_trip_tickets()
+    tickets = fetch_all_ticket_dates()
     print("Fetched ticket data:", tickets)
 
     utc_now = datetime.utcnow()
