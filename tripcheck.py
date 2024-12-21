@@ -89,7 +89,7 @@ if __name__ == "__main__":
     print("Fetched ticket data:", tickets)
 
     # 检查 27, 28, 29 是否有余票
-    alert_dates = ["27", "28", "29"]
+    alert_dates = ["31","27", "28", "29"]
     available_dates = [ticket["date"] for ticket in tickets if ticket["date"] in alert_dates]
 
     if available_dates:
