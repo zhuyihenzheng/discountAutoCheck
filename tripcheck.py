@@ -1,3 +1,4 @@
+import base64
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
@@ -19,21 +20,14 @@ options.add_argument("start-maximized")          # 最大化窗口
 options.add_argument("disable-infobars")
 options.add_argument("--disable-extensions")
 options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.88 Safari/537.36")
-options.add_argument("--headless")  # 无头模式，后台运行
 driver_path = "/usr/local/bin/chromedriver-linux64/chromedriver"
 service = Service(driver_path)
 driver = webdriver.Chrome(service=service, options=options)
 
 def send_wechat_message(title, content):
-    # 替换为你的 Server酱 SendKey
     send_key = os.getenv("WECHAT_SENDKEY")
     url = f"https://sctapi.ftqq.com/{send_key}.send"
-    
-    data = {
-        "title": title,       # 消息标题
-        "desp": content       # 消息内容
-    }
-    
+    data = {"title": title, "desp": content}
     response = requests.post(url, data=data)
     if response.status_code == 200:
         print("消息发送成功")
@@ -46,31 +40,33 @@ def fetch_all_ticket_dates():
     time.sleep(4)  # 等待页面加载
 
     ticket_data = []
+    screenshots = []
 
     try:
-        # 查找所有 "選択" 按钮
         select_buttons = WebDriverWait(driver, 10).until(
             EC.presence_of_all_elements_located((By.CSS_SELECTOR, "taro-view-core.hover_pointer"))
         )
 
-        for button in select_buttons:
+        for index, button in enumerate(select_buttons):
             try:
-                # 点击按钮
                 driver.execute_script("arguments[0].click();", button)
-                time.sleep(3)  # 等待页面加载
+                time.sleep(3)
 
-                # 查找日期信息
+                # 截取页面截图
+                screenshot_path = f"screenshot_{index}.png"
+                driver.save_screenshot(screenshot_path)
+                with open(screenshot_path, "rb") as image_file:
+                    base64_image = base64.b64encode(image_file.read()).decode('utf-8')
+                    screenshots.append(base64_image)
+
                 date_elements = WebDriverWait(driver, 10).until(
                     EC.presence_of_all_elements_located((By.CSS_SELECTOR, "taro-text-core[style*='color: rgb(15, 41, 77)']"))
                 )
 
                 for date_element in date_elements:
                     date_text = date_element.text.strip()
-                    ticket_data.append({
-                        "date": date_text
-                    })
+                    ticket_data.append({"date": date_text})
 
-                # 返回主页面
                 driver.back()
                 time.sleep(3)
 
@@ -82,7 +78,7 @@ def fetch_all_ticket_dates():
     finally:
         driver.quit()
 
-    return ticket_data
+    return ticket_data, screenshots
 
 def upload_to_gist(content):
     GIST_TOKEN = os.getenv("GIST_TOKEN")
@@ -123,13 +119,12 @@ def upload_to_gist(content):
             }
         }
         requests.post(url, headers=headers, json=payload)
-        print("New Gist created: ")
+        print("New Gist created.")
 
 if __name__ == "__main__":
-    tickets = fetch_all_ticket_dates()
+    tickets, screenshots = fetch_all_ticket_dates()
     print("Fetched ticket data:", tickets)
 
-    # 检查 27, 28, 29 是否有余票
     alert_dates = ["27", "28", "29"]
     available_dates = [ticket["date"] for ticket in tickets if ticket["date"] in alert_dates]
 
@@ -167,8 +162,17 @@ if __name__ == "__main__":
         </div>
         """
 
+    html_content += "<h2>Screenshots</h2>"
+    for screenshot in screenshots:
+        html_content += f"""
+        <div class="screenshot">
+            <img src="data:image/png;base64,{screenshot}" alt="Screenshot" />
+        </div>
+        """
+
     html_content += """
     </body>
     </html>
     """
+
     upload_to_gist(html_content)
