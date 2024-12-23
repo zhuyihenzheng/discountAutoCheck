@@ -84,6 +84,47 @@ def fetch_all_ticket_dates():
 
     return ticket_data
 
+def upload_to_gist(content):
+    GIST_TOKEN = os.getenv("GIST_TOKEN")
+    headers = {"Authorization": f"token {GIST_TOKEN}"}
+
+    # 检查是否已有 Gist
+    gist_id = None
+    response = requests.get("https://api.github.com/gists", headers=headers)
+    if response.status_code == 200:
+        gists = response.json()
+        for gist in gists:
+            if gist["description"] == "Trip Ticket Availability":
+                gist_id = gist["id"]
+                break
+
+    # 创建或更新 Gist
+    if gist_id:
+        url = f"https://api.github.com/gists/{gist_id}"
+        payload = {
+            "description": "Trip Ticket Availability",
+            "files": {
+                "trip_tickets.html": {
+                    "content": content
+                }
+            }
+        }
+        requests.patch(url, headers=headers, json=payload)
+        print("Gist updated.")
+    else:
+        url = "https://api.github.com/gists"
+        payload = {
+            "description": "Trip Ticket Availability",
+            "public": True,
+            "files": {
+                "trip_tickets.html": {
+                    "content": content
+                }
+            }
+        }
+        requests.post(url, headers=headers, json=payload)
+        print("New Gist created: ")
+
 if __name__ == "__main__":
     tickets = fetch_all_ticket_dates()
     print("Fetched ticket data:", tickets)
@@ -130,3 +171,4 @@ if __name__ == "__main__":
     </body>
     </html>
     """
+    upload_to_gist(html_content)
