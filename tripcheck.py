@@ -10,6 +10,7 @@ import time
 from datetime import datetime
 import pytz
 import os
+import json
 
 # 配置 Chrome 浏览器选项
 options = webdriver.ChromeOptions()
@@ -23,6 +24,18 @@ options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) Apple
 driver_path = "/usr/local/bin/chromedriver-linux64/chromedriver"
 service = Service(driver_path)
 driver = webdriver.Chrome(service=service, options=options)
+
+STATE_FILE = "ticket_state.json"
+
+def load_previous_state():
+    if os.path.exists(STATE_FILE):
+        with open(STATE_FILE, "r") as f:
+            return json.load(f)
+    return {}
+
+def save_current_state(state):
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f)
 
 def send_wechat_message(title, content):
     send_key = os.getenv("WECHAT_SENDKEY")
@@ -50,7 +63,7 @@ def fetch_all_ticket_dates():
         for index, button in enumerate(select_buttons):
             try:
                 driver.execute_script("arguments[0].click();", button)
-                time.sleep(10)
+                time.sleep(3)
 
                 # 截取页面截图
                 screenshot_path = f"screenshot_{index}.png"
@@ -122,16 +135,19 @@ def upload_to_gist(content):
         print("New Gist created.")
 
 if __name__ == "__main__":
+    previous_state = load_previous_state()
     tickets, screenshots = fetch_all_ticket_dates()
     print("Fetched ticket data:", tickets)
 
     alert_dates = ["27", "28", "29"]
     available_dates = [ticket["date"] for ticket in tickets if ticket["date"] in alert_dates]
 
-    if available_dates:
-        send_wechat_message("Trip Ticket Alert", f"以下日期有余票: {', '.join(available_dates)}")
+    if available_dates != previous_state.get("available_dates"):
+        if available_dates:
+            send_wechat_message("Trip Ticket Alert", f"以下日期有余票: {', '.join(available_dates)}")
+        save_current_state({"available_dates": available_dates})
     else:
-        print("No tickets available for specified dates.")
+        print("No changes in ticket availability. No message sent.")
 
     utc_now = datetime.utcnow()
     jst = pytz.timezone("Asia/Tokyo")
