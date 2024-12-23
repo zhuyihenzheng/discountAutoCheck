@@ -50,7 +50,7 @@ def fetch_all_ticket_dates():
         for index, button in enumerate(select_buttons):
             try:
                 driver.execute_script("arguments[0].click();", button)
-                time.sleep(3)
+                time.sleep(10)
 
                 # 截取页面截图
                 screenshot_path = f"screenshot_{index}.png"
