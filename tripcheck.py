@@ -35,7 +35,7 @@ def send_wechat_message(title, content):
         print("消息发送失败:", response.text)
 
 def fetch_all_ticket_dates():
-    url = "https://jp.trip.com/travel-guide/attraction/xi-an/shaanxi-history-museum-75684?curr=JPY&locale=ja-JP"
+    url = "https://us.trip.com/travel-guide/attraction/xi-an/shaanxi-history-museum-75684"
     driver.get(url)
     time.sleep(4)  # 等待页面加载
 
@@ -60,7 +60,7 @@ def fetch_all_ticket_dates():
                     screenshots.append(base64_image)
 
                 date_elements = WebDriverWait(driver, 10).until(
-                    EC.presence_of_all_elements_located((By.CSS_SELECTOR, "taro-text-core[style*='color: rgb(15, 41, 77)']"))
+                    EC.presence_of_all_elements_located((By.CSS_SELECTOR, "taro-text-core:not([style*='color: rgb(206, 210, 217)'])"))
                 )
 
                 for date_element in date_elements:
