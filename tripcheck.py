@@ -25,17 +25,47 @@ driver_path = "/usr/local/bin/chromedriver-linux64/chromedriver"
 service = Service(driver_path)
 driver = webdriver.Chrome(service=service, options=options)
 
-STATE_FILE = "ticket_state.json"
-
 def load_previous_state():
-    if os.path.exists(STATE_FILE):
-        with open(STATE_FILE, "r") as f:
-            return json.load(f)
+    GIST_TOKEN = os.getenv("GIST_TOKEN")
+    headers = {"Authorization": f"token {GIST_TOKEN}"}
+    url = "https://api.github.com/gists"
+
+    response = requests.get(url, headers=headers)
+    if response.status_code == 200:
+        gists = response.json()
+        for gist in gists:
+            if gist["description"] == "Ticket State":
+                state_content = gist["files"]["ticket_state.json"]["content"]
+                return json.loads(state_content)
     return {}
 
 def save_current_state(state):
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f)
+    GIST_TOKEN = os.getenv("GIST_TOKEN")
+    headers = {"Authorization": f"token {GIST_TOKEN}"}
+    url = "https://api.github.com/gists"
+    gist_id = None
+
+    response = requests.get(url, headers=headers)
+    if response.status_code == 200:
+        gists = response.json()
+        for gist in gists:
+            if gist["description"] == "Ticket State":
+                gist_id = gist["id"]
+                break
+
+    payload = {
+        "description": "Ticket State",
+        "files": {
+            "ticket_state.json": {
+                "content": json.dumps(state)
+            }
+        }
+    }
+
+    if gist_id:
+        requests.patch(f"https://api.github.com/gists/{gist_id}", headers=headers, json=payload)
+    else:
+        requests.post(url, headers=headers, json=payload)
 
 def send_wechat_message(title, content):
     send_key = os.getenv("WECHAT_SENDKEY")
