@@ -1,0 +1,43 @@
+name: Upload Discounted Products to Gist
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 21 * * *" 
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v2
+
+    - name: Set up Python
+      uses: actions/setup-python@v2
+      with:
+        python-version: "3.x"
+    - name: Install dependencies
+      run: |
+        pip install pytz
+
+    - name: Install Chrome and ChromeDriver
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y wget unzip
+        wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+        sudo apt install -y ./google-chrome-stable_current_amd64.deb
+        CHROME_VERSION=$(google-chrome --version | grep -oP "\d+\.\d+\.\d+")
+        wget -N https://storage.googleapis.com/chrome-for-testing-public/130.0.6723.91/linux64/chromedriver-linux64.zip || exit 1
+        unzip chromedriver-linux64.zip -d /usr/local/bin/
+        ls /usr/local/bin/
+        
+    - name: Install Python dependencies
+      run: |
+        pip install --upgrade selenium requests
+
+    - name: Run Python script to generate HTML and upload to Gist
+      env:
+        GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+        WECHAT_SENDKEY: ${{ secrets.WECHAT_SENDKEY }}
+      run: python autocheck.py
