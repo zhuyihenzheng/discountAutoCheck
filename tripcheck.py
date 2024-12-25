@@ -173,6 +173,7 @@ def upload_to_gist(content):
 
 if __name__ == "__main__":
     previous_state = load_previous_state()
+    print(previous_state)
     tickets, screenshots = fetch_all_ticket_dates()
     print("Fetched ticket data:", tickets)
 
@@ -186,7 +187,7 @@ if __name__ == "__main__":
     print(available_dates != previous_state.get("available_dates"))
     if available_dates != previous_state.get("available_dates"):
         if available_dates:
-            send_wechat_message("Trip Ticket Alert", f"以下日期有余票: {', '.join(available_dates)}")
+            #send_wechat_message("Trip Ticket Alert", f"以下日期有余票: {', '.join(available_dates)}")
         save_current_state({"available_dates": available_dates})
     else:
         print("No changes in ticket availability. No message sent.")
