@@ -34,9 +34,16 @@ def load_previous_state():
     if response.status_code == 200:
         gists = response.json()
         for gist in gists:
-            if gist["description"] == "Ticket State":
-                state_content = gist["files"].get("ticket_state.json", {}).get("content", {})
+            try:
+                # 获取文件内容
+                ticket_file = gist.get("files", {}).get("ticket_state.json", {})
+                state_content = ticket_file.get("content", "")  # 默认内容为空的 JSON 字符串
+                
+                # 尝试加载 JSON 内容
                 return json.loads(state_content)
+            except (json.JSONDecodeError, AttributeError) as e:
+                # 如果内容不是合法的 JSON 或其他异常，返回空字典
+                return {}
     return {}
 
 def save_current_state(state):
