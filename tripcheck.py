@@ -35,7 +35,7 @@ def load_previous_state():
         gists = response.json()
         for gist in gists:
             if gist["description"] == "Ticket State":
-                state_content = gist["files"]["ticket_state.json"]["content"]
+                state_content = gist["files"]["ticket_state.json"]
                 return json.loads(state_content)
     return {}
 
@@ -57,7 +57,7 @@ def save_current_state(state):
         "description": "Ticket State",
         "files": {
             "ticket_state.json": {
-                "content": json.dumps(state)
+                json.dumps(state)
             }
         }
     }
