@@ -179,6 +179,11 @@ if __name__ == "__main__":
     alert_dates = ["27", "28", "29"]
     available_dates = [ticket["date"] for ticket in tickets if ticket["date"] in alert_dates]
 
+    print(available_dates)
+    print("------------------------------")
+    print(previous_state.get("available_dates"))
+    print("------------------------------")
+    print(available_dates != previous_state.get("available_dates"))
     if available_dates != previous_state.get("available_dates"):
         if available_dates:
             send_wechat_message("Trip Ticket Alert", f"以下日期有余票: {', '.join(available_dates)}")
