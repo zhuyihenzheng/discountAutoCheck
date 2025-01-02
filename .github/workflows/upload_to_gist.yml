@@ -1,9 +1,9 @@
 name: Upload Discounted Products to Gist
 
-on:
-  workflow_dispatch:
-  schedule:
-    - cron: "2 * * * *" 
+#on:
+  #workflow_dispatch:
+  #schedule:
+  #  - cron: "2 * * * *" 
 
 jobs:
   upload:
