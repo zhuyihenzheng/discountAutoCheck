@@ -28,7 +28,7 @@ jobs:
         wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
         sudo apt install -y ./google-chrome-stable_current_amd64.deb
         CHROME_VERSION=$(google-chrome --version | grep -oP "\d+\.\d+\.\d+")
-        wget -N https://storage.googleapis.com/chrome-for-testing-public/130.0.6723.91/linux64/chromedriver-linux64.zip || exit 1
+        wget -N https://storage.googleapis.com/chrome-for-testing-public/134.0.6998.35/linux64/chromedriver-linux64.zip || exit 1
         unzip chromedriver-linux64.zip -d /usr/local/bin/
         ls /usr/local/bin/
         
