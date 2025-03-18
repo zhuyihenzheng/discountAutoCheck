@@ -53,13 +53,13 @@ def fetch_discounted_products():
             # load_more_button = driver.find_element(
             # By.XPATH, "//div[@class='show-more']//button[contains(text(), 'さらに見る')]")
             # driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", load_more_button)
-            load_more_button = WebDriverWait(driver, 10).until(
+            load_more_button = WebDriverWait(driver, 20).until(
                 EC.element_to_be_clickable((By.XPATH, "//div[@class='show-more']//button[contains(text(), 'さらに見る')]"))
             )
             print(f"さらに見る clicked:{scroll_count}")
             driver.execute_script("arguments[0].click();", load_more_button)
             scroll_count = scroll_count + 1
-            time.sleep(3)  # 等待加载新商品
+            time.sleep(10)  # 等待加载新商品
         except (NoSuchElementException, TimeoutException):
             # 如果按钮不存在，则退出循环
             print("No more 'さらに見る' button, all items loaded.")
