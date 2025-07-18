@@ -34,16 +34,20 @@ def load_previous_state():
     if response.status_code == 200:
         gists = response.json()
         for gist in gists:
+            # 仅当描述为 "Ticket State" 时进一步检查（如果存在该描述）
+            if gist.get("description") and gist["description"] != "Ticket State":
+                continue
+
+            ticket_file = gist.get("files", {}).get("ticket_state.json")
+            if not ticket_file:
+                continue
+
+            state_content = ticket_file.get("content", "")
             try:
-                # 获取文件内容
-                ticket_file = gist.get("files", {}).get("ticket_state.json", {})
-                state_content = ticket_file.get("content", "")  # 默认内容为空的 JSON 字符串
-                
-                # 尝试加载 JSON 内容
                 return json.loads(state_content)
-            except (json.JSONDecodeError, AttributeError) as e:
-                # 如果内容不是合法的 JSON 或其他异常，返回空字典
-                return {}
+            except json.JSONDecodeError:
+                # 如果 JSON 解析失败，继续查找下一个 gist
+                continue
     return {}
 
 def save_current_state(state):
@@ -188,6 +192,7 @@ if __name__ == "__main__":
     if available_dates != previous_state.get("available_dates"):
         if available_dates:
             #send_wechat_message("Trip Ticket Alert", f"以下日期有余票: {', '.join(available_dates)}")
+            pass
         save_current_state({"available_dates": available_dates})
     else:
         print("No changes in ticket availability. No message sent.")
