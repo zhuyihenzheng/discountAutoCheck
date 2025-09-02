@@ -18,7 +18,7 @@ options.add_argument("--disable-dev-shm-usage")
 options.add_argument("start-maximized")          # 最大化窗口
 options.add_argument("disable-infobars")
 options.add_argument("--disable-extensions")
-options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.88 Safari/537.36")
+#options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.88 Safari/537.36")
 driver_path = "/usr/local/bin/chromedriver-linux64/chromedriver"
 service = Service(driver_path)
 driver = webdriver.Chrome(service=service, options=options)
