@@ -44,9 +44,9 @@ def send_wechat_message(title, content):
         print("消息发送失败:", response.text)
 
 def fetch_discounted_products():
-    url = "https://www.patagonia.jp/shop/web-specials"
+    url = "https://www.patagonia.jp/shop/web-specials?F25WO=&page=100"
     driver.get(url)
-    time.sleep(4)  # 等待页面加载
+    time.sleep(120)  # 等待页面加载
 
     # 持续点击 "さらに見る" 按钮直到按钮不再显示
     scroll_count = 0
