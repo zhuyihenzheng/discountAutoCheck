@@ -22,7 +22,7 @@ options.add_argument("start-maximized")          # 最大化窗口
 options.add_argument("disable-infobars")
 options.add_argument("--disable-extensions")
 options.add_argument("--headless=new")
-#options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.88 Safari/537.36")
+options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.88 Safari/537.36")
 #driver_path = "/usr/local/bin/chromedriver-linux64/chromedriver"
 #service = Service(driver_path)
 #driver = webdriver.Chrome(service=service, options=options)
@@ -52,7 +52,7 @@ def fetch_discounted_products():
     # 等待商品卡片出现（比固定sleep稳）
     time.sleep(10)
     html = driver.page_source
-    print(html[:1000])   # 只打印前1000字符
+    print(html[:10000])   # 只打印前1000字符
 
     # 持续点击 "さらに見る"
     scroll_count = 0
