@@ -46,9 +46,9 @@ def send_wechat_message(title, content):
         print("消息发送失败:", response.text)
 
 def fetch_discounted_products():
-    url = "https://www.patagonia.jp/shop/web-specials?F25WO=&page=100"
+    url = "https://www.patagonia.jp/shop/web-specials?F25WO=&page=2"
     driver.get(url)
-    time.sleep(120)  # 等待页面加载
+    time.sleep(10)  # 等待页面加载
 
     # 持续点击 "さらに見る" 按钮直到按钮不再显示
     scroll_count = 0
@@ -102,7 +102,7 @@ for item in items:
             continue
 
         # 只抓 > 30% 的商品
-        if discount_percent <= 30:
+        if discount_percent <= 20:
             continue
 
         # ---- 原价 / 现价（优先读 content 属性，失败再读文本）----
