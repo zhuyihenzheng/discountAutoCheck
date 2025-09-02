@@ -46,7 +46,7 @@ def send_wechat_message(title, content):
         print("消息发送失败:", response.text)
 
 def fetch_discounted_products():
-    url = "https://www.patagonia.jp/shop/web-specials"
+    url = "https://www.patagonia.jp/shop/web-specials?F25WO="
     driver.get(url)
 
     # 等待商品卡片出现（比固定sleep稳）
