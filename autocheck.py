@@ -50,15 +50,7 @@ def fetch_discounted_products():
     driver.get(url)
 
     # 等待商品卡片出现（比固定sleep稳）
-    try:
-        WebDriverWait(driver, 20).until(
-            EC.presence_of_all_elements_located(
-                (By.CSS_SELECTOR, "product-tile .product-tile__inner, div.product[data-pid] product-tile .product-tile__inner")
-            )
-        )
-    except TimeoutException:
-        print("初次加载超时，页面无商品卡片")
-        return "<html><body><p>No items loaded</p></body></html>"
+    time.sleep(10)
 
     # 持续点击 "さらに見る"
     scroll_count = 0
