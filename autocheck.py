@@ -51,6 +51,8 @@ def fetch_discounted_products():
 
     # 等待商品卡片出现（比固定sleep稳）
     time.sleep(10)
+    html = driver.page_source
+    print(html[:1000])   # 只打印前1000字符
 
     # 持续点击 "さらに見る"
     scroll_count = 0
