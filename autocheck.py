@@ -46,7 +46,7 @@ def send_wechat_message(title, content):
         print("消息发送失败:", response.text)
 
 def fetch_discounted_products():
-    url = "https://www.patagonia.jp/shop/web-specials?F25WO=&page=2"
+    url = "https://www.patagonia.jp/shop/web-specials?F25WO=&page=100"
     driver.get(url)
 
     # 等待商品卡片出现（比固定sleep稳）
@@ -136,9 +136,9 @@ def fetch_discounted_products():
             # ---- 链接 ----
             product_link = None
             try:
-                a = item.find_element(By.CSS_SELECTOR, "a[href*='/product/']")
+                a = item.find_element(By.CSS_SELECTOR, ".product-tile__cover a[itemprop='url']")
                 href = a.get_attribute("href")
-                product_link = urljoin(BASE, href)
+                product_link = urljoin("https://www.patagonia.jp", href)
             except Exception:
                 product_link = None
 
