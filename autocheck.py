@@ -46,13 +46,13 @@ def send_wechat_message(title, content):
         print("消息发送失败:", response.text)
 
 def fetch_discounted_products():
-    url = "https://www.patagonia.jp/shop/web-specials?F25WO="
+    url = "https://www.patagonia.jp/shop/web-specials?F25WO=&page=2"
     driver.get(url)
 
     # 等待商品卡片出现（比固定sleep稳）
-    time.sleep(10)
-    html = driver.page_source
-    print(html[:50000])   # 只打印前1000字符
+    time.sleep(60)
+    #html = driver.page_source
+    #print(html[:50000])   # 只打印前1000字符
 
     # 持续点击 "さらに見る"
     scroll_count = 0
