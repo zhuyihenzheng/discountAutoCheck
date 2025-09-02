@@ -10,6 +10,8 @@ from datetime import datetime
 import pytz
 import os
 from selenium.webdriver.chrome.options import Options
+from urllib.parse import urljoin
+
 # 配置 Chrome 浏览器选项
 options = webdriver.ChromeOptions()
 
@@ -67,48 +69,113 @@ def fetch_discounted_products():
             # 如果按钮不存在，则退出循环
             print("No more 'さらに見る' button, all items loaded.")
             break
-
-    items = driver.find_elements(By.CLASS_NAME, "product-tile__inner")
-    # 输出最终获取到的商品数量
-    print(f"scroll :{scroll_count}, Total items loaded: {len(items)}")
     
-    products = []
-    for item in items:
+# 1) 先取到所有商品卡片（兼容两种容器写法）
+items = driver.find_elements(
+    By.CSS_SELECTOR,
+    "div.product[data-pid] product-tile .product-tile__inner, "
+    "product-tile .product-tile__inner"
+)
+
+print(f"scroll :{scroll_count}, Total items loaded: {len(items)}")
+
+products = []
+for item in items:
+    try:
+        # ---- 折扣百分比（两种来源，先读徽章，再读 data- 属性）----
+        discount_percent = None
         try:
-            # 折扣百分比
-            discount_element = item.find_element(By.CLASS_NAME, "sale-percent")
-            discount_percent = int(discount_element.text)
-            
-            # 只选取折扣超过30%的商品
-            if discount_percent > 30:
-                # 原价
-                # original_price = item.find_element(By.CLASS_NAME, "strike-through").text.strip()
-                original_price = item.find_element(By.XPATH, ".//span[contains(@class, 'strike-through')]/span[contains(@class, 'value')]").get_attribute("content")
-                # 折后价
-                sale_price = item.find_element(By.XPATH, ".//span[contains(@class, 'sales')]/span[contains(@class, 'value')]").get_attribute("content")
-                
-                # 图片 URL
-                image_url = item.find_element(By.CSS_SELECTOR, "meta[itemprop='image']").get_attribute("content")
-                
-                # 产品名称
-                product_name = item.find_element(By.CLASS_NAME, "product-tile__name").text.strip()
+            # 方式 A：徽章上的 “30% Off”
+            badge = item.find_element(By.CSS_SELECTOR, ".badge--percent-off .sale-percent")
+            # 一般是 '30'；保险起见做一下清洗
+            discount_percent = int(float(badge.text.strip()))
+        except Exception:
+            # 方式 B：价格块上的 data-discount-percent="30.0"
+            try:
+                dp = item.find_element(By.CSS_SELECTOR, ".color-price.active")
+                discount_percent = int(float(dp.get_attribute("data-discount-percent")))
+            except Exception:
+                pass
 
-                # 商品链接
-                product_link_element = item.find_element(By.CSS_SELECTOR, "div.product-tile__cover a")
-                product_link = product_link_element.get_attribute("href")
+        if discount_percent is None:
+            # 没拿到折扣就跳过
+            continue
 
-                # 将信息添加到列表中
-                products.append({
-                    "name": product_name,
-                    "original_price": original_price,
-                    "sale_price": sale_price,
-                    "discount_percent": discount_percent,
-                    "image_url": image_url,
-                    "product_link": product_link,
-                    "sizes": []
-                })
-        except Exception as e:
-            print(f"Error processing item: {e}")
+        # 只抓 > 30% 的商品
+        if discount_percent <= 30:
+            continue
+
+        # ---- 原价 / 现价（优先读 content 属性，失败再读文本）----
+        def _get_price(css_xpath, by="css"):
+            try:
+                if by == "css":
+                    el = item.find_element(By.CSS_SELECTOR, css_xpath)
+                else:
+                    el = item.find_element(By.XPATH, css_xpath)
+                val = el.get_attribute("content")
+                if not val:
+                    # 回退：从可见文本抽取数字
+                    raw = el.text.strip()
+                    # 去掉非数字字符
+                    digits = "".join(ch for ch in raw if ch.isdigit())
+                    val = digits or None
+                return val
+            except Exception:
+                return None
+
+        # 原价（删除线）
+        original_price = (
+            _get_price(".strike-through .value[itemprop='price']") or
+            _get_price(".//span[contains(@class,'strike-through')]/span[contains(@class,'value')]", by="xpath")
+        )
+
+        # 折后价
+        sale_price = (
+            _get_price(".sales .value[itemprop='price']") or
+            _get_price(".//span[contains(@class,'sales')]/span[contains(@class,'value')]", by="xpath")
+        )
+
+        # ---- 图片 URL（meta[itemprop='image'] 最稳）----
+        image_url = None
+        try:
+            image_url = item.find_element(By.CSS_SELECTOR, "meta[itemprop='image']").get_attribute("content")
+        except Exception:
+            # 回退到 <picture> 里的第一个 source（若有需要）
+            try:
+                image_url = item.find_element(By.CSS_SELECTOR, "picture source").get_attribute("srcset").split()[0]
+            except Exception:
+                image_url = None
+
+        # ---- 商品名称 ----
+        product_name = None
+        try:
+            product_name = item.find_element(By.CSS_SELECTOR, ".product-tile__name").text.strip()
+        except Exception:
+            product_name = ""
+
+        # ---- 商品链接（优先任一指向 /product/ 的 <a>；然后补全绝对地址）----
+        product_link = None
+        try:
+            a = item.find_element(By.CSS_SELECTOR, "a[href*='/product/']")
+            href = a.get_attribute("href")
+            product_link = urljoin(BASE, href)
+        except Exception:
+            product_link = None
+
+        # 组装
+        products.append({
+            "name": product_name,
+            "original_price": original_price,
+            "sale_price": sale_price,
+            "discount_percent": discount_percent,
+            "image_url": image_url,
+            "product_link": product_link,
+            "sizes": []
+        })
+
+    except Exception as e:
+        print(f"Error processing item: {e}")
+
 
     # 在详细页面抓取尺寸信息
     for product in products:
