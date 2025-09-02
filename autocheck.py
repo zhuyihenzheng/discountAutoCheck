@@ -9,19 +9,23 @@ import time
 from datetime import datetime
 import pytz
 import os
-
+from selenium.webdriver.chrome.options import Options
 # 配置 Chrome 浏览器选项
 options = webdriver.ChromeOptions()
+
 options.add_argument("--headless")  # 无头模式，后台运行
 options.add_argument("--no-sandbox")
 options.add_argument("--disable-dev-shm-usage")
 options.add_argument("start-maximized")          # 最大化窗口
 options.add_argument("disable-infobars")
 options.add_argument("--disable-extensions")
+options.add_argument("--headless=new")
 #options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.88 Safari/537.36")
-driver_path = "/usr/local/bin/chromedriver-linux64/chromedriver"
-service = Service(driver_path)
-driver = webdriver.Chrome(service=service, options=options)
+#driver_path = "/usr/local/bin/chromedriver-linux64/chromedriver"
+#service = Service(driver_path)
+#driver = webdriver.Chrome(service=service, options=options)
+driver = webdriver.Chrome(options=options)
+
 
 def send_wechat_message(title, content):
     # 替换为你的 Server酱 SendKey
