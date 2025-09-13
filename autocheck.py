@@ -92,8 +92,20 @@ def fetch_discounted_products():
                 except Exception:
                     pass
 
-            if discount_percent is None or discount_percent <= 30:
-                continue  # 只要 >30%
+            original_price = (
+                _get_price(".strike-through .value[itemprop='price']") or
+                _get_price(".//span[contains(@class,'strike-through')]/span[contains(@class,'value')]", by="xpath")
+            )
+            sale_price = (
+                _get_price(".sales .value[itemprop='price']") or
+                _get_price(".//span[contains(@class,'sales')]/span[contains(@class,'value')]", by="xpath")
+            )
+            
+            if discount_percent is None:
+                discount_percent = (original_price - sale_price) * 100 / original_price
+
+            if discount_percent <= 30:
+                continue
 
             # ---- 价格读取：优先 content，失败再读文本 ----
             def _get_price(selector, by="css"):
@@ -107,15 +119,6 @@ def fetch_discounted_products():
                     return val
                 except Exception:
                     return None
-
-            original_price = (
-                _get_price(".strike-through .value[itemprop='price']") or
-                _get_price(".//span[contains(@class,'strike-through')]/span[contains(@class,'value')]", by="xpath")
-            )
-            sale_price = (
-                _get_price(".sales .value[itemprop='price']") or
-                _get_price(".//span[contains(@class,'sales')]/span[contains(@class,'value')]", by="xpath")
-            )
 
             # ---- 图片 ----
             image_url = None
