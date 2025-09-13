@@ -65,11 +65,11 @@ def send_wechat_message(title, content):
         print("消息发送失败:", response.text)
 
 def fetch_discounted_products():
-    url = f"{BASE}/shop/web-specials?F25WO=&page=50"
+    url = f"{BASE}/shop/web-specials?F25WO=&page=40"
     driver.get(url)
 
     # 等待出现任一 product-tile
-    WebDriverWait(driver, 50).until(
+    WebDriverWait(driver, 100).until(
         EC.presence_of_element_located((By.CSS_SELECTOR, "div.product[data-pid] > product-tile"))
     )
 
