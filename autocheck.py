@@ -56,19 +56,19 @@ def fetch_discounted_products():
 
     # 持续点击 "さらに見る"
     scroll_count = 0
-    while True:
-        try:
-            load_more_button = WebDriverWait(driver, 5).until(
-                EC.element_to_be_clickable((By.XPATH, "//div[@class='show-more']//button[contains(text(), 'さらに見る')]"))
-            )
-            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", load_more_button)
-            driver.execute_script("arguments[0].click();", load_more_button)
-            scroll_count += 1
-            # 等到新卡片追加（或简单等一下）
-            time.sleep(2)
-        except (NoSuchElementException, TimeoutException):
-            print("No more 'さらに見る' button, all items loaded.")
-            break
+    # while True:
+    #     try:
+    #         load_more_button = WebDriverWait(driver, 5).until(
+    #             EC.element_to_be_clickable((By.XPATH, "//div[@class='show-more']//button[contains(text(), 'さらに見る')]"))
+    #         )
+    #         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", load_more_button)
+    #         driver.execute_script("arguments[0].click();", load_more_button)
+    #         scroll_count += 1
+    #         # 等到新卡片追加（或简单等一下）
+    #         time.sleep(2)
+    #     except (NoSuchElementException, TimeoutException):
+    #         print("No more 'さらに見る' button, all items loaded.")
+    #         break
 
     # 1) 取商品卡片（兼容两种容器）
     items = driver.find_elements(
