@@ -28,6 +28,23 @@ options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) Apple
 #driver = webdriver.Chrome(service=service, options=options)
 driver = webdriver.Chrome(options=options)
 
+def _num(s):
+    if s is None:
+        return None
+    try:
+        # 既兼容 "8250.0" 也兼容 "¥ 8,250"
+        s = str(s)
+        digits = "".join(ch for ch in s if (ch.isdigit() or ch == "."))
+        return float(digits) if digits else None
+    except Exception:
+        return None
+
+def _first_or_none(root, by, sel):
+    try:
+        return root.find_element(by, sel)
+    except Exception:
+        return None
+
 
 def send_wechat_message(title, content):
     # 替换为你的 Server酱 SendKey
@@ -46,142 +63,107 @@ def send_wechat_message(title, content):
         print("消息发送失败:", response.text)
 
 def fetch_discounted_products():
-    url = "https://www.patagonia.jp/shop/web-specials?F25WO=&page=20"
+    url = f"{BASE}/shop/web-specials?F25WO=&page=20"
     driver.get(url)
 
-    # 等待商品卡片出现（比固定sleep稳）
-    time.sleep(60)
-    #html = driver.page_source
-    #print(html[:50000])   # 只打印前1000字符
-
-    # 持续点击 "さらに見る"
-    scroll_count = 0
-    # while True:
-    #     try:
-    #         load_more_button = WebDriverWait(driver, 5).until(
-    #             EC.element_to_be_clickable((By.XPATH, "//div[@class='show-more']//button[contains(text(), 'さらに見る')]"))
-    #         )
-    #         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", load_more_button)
-    #         driver.execute_script("arguments[0].click();", load_more_button)
-    #         scroll_count += 1
-    #         # 等到新卡片追加（或简单等一下）
-    #         time.sleep(2)
-    #     except (NoSuchElementException, TimeoutException):
-    #         print("No more 'さらに見る' button, all items loaded.")
-    #         break
-
-    # 1) 取商品卡片（兼容两种容器）
-    items = driver.find_elements(
-        By.CSS_SELECTOR,
-        "div.product[data-pid] product-tile .product-tile__inner, product-tile .product-tile__inner"
+    # 等待出现任一 product-tile
+    WebDriverWait(driver, 20).until(
+        EC.presence_of_element_located((By.CSS_SELECTOR, "div.product[data-pid] > product-tile"))
     )
-    print(f"scroll :{scroll_count}, Total items loaded: {len(items)}")
+
+    # 每个商品卡：div.product[data-pid] 下的 <product-tile>
+    tiles = driver.find_elements(By.CSS_SELECTOR, "div.product[data-pid] > product-tile")
+    print(f"Found tiles: {len(tiles)}")
 
     products = []
-    for item in items:
+    for tile in tiles:
         try:
-            # ---- 折扣百分比：徽章或 data-discount-percent ----
-            discount_percent = None
-            try:
-                badge = item.find_element(By.CSS_SELECTOR, ".badge--percent-off .sale-percent")
-                discount_percent = int(float(badge.text.strip()))
-            except Exception:
-                try:
-                    dp = item.find_element(By.CSS_SELECTOR, ".color-price.active")
-                    discount_percent = int(float(dp.get_attribute("data-discount-percent")))
-                except Exception:
-                    pass
+            # --- 名称
+            name_el = _first_or_none(tile, By.CSS_SELECTOR, ".pdp-link .product-tile__name")
+            product_name = name_el.text.strip() if name_el else ""
 
-            original_price = (
-                _get_price(".strike-through .value[itemprop='price']") or
-                _get_price(".//span[contains(@class,'strike-through')]/span[contains(@class,'value')]", by="xpath")
-            )
-            sale_price = (
-                _get_price(".sales .value[itemprop='price']") or
-                _get_price(".//span[contains(@class,'sales')]/span[contains(@class,'value')]", by="xpath")
-            )
-            
-            if discount_percent is None:
-                discount_percent = (original_price - sale_price) * 100 / original_price
+            # --- 链接
+            link_el = _first_or_none(tile, By.CSS_SELECTOR, ".pdp-link a.link[itemprop='url']")
+            product_link = urljoin(BASE, link_el.get_attribute("href")) if link_el else None
 
-            if discount_percent <= 30:
+            # --- 价格（优先从 <product-tile-pricing> 的属性拿）
+            ptp = _first_or_none(tile, By.CSS_SELECTOR, "product-tile-pricing")
+            sale_price = _num(ptp.get_attribute("sale-price")) if ptp else None
+            list_price = _num(ptp.get_attribute("list-price")) if ptp else None
+
+            # 兜底：从当前激活色卡按钮 data-* 里拿
+            if sale_price is None or list_price is None:
+                active_swatch = _first_or_none(
+                    tile, By.CSS_SELECTOR,
+                    ".product-tile__pagination .product-tile__bullet .product-tile__colors.default.active"
+                )
+                if active_swatch:
+                    sale_price = sale_price or _num(active_swatch.get_attribute("data-sale-price"))
+                    list_price = list_price or _num(active_swatch.get_attribute("data-list-price"))
+
+            if not sale_price or not list_price or list_price <= 0:
+                # 价格异常则跳过
                 continue
 
-            # ---- 价格读取：优先 content，失败再读文本 ----
-            def _get_price(selector, by="css"):
+            discount_percent = round((list_price - sale_price) * 100 / list_price, 1)
+            if discount_percent <= 30:
+                # 不满足你设定的 30% 阈值
+                continue
+
+            # --- 图片（优先当前激活颜色的 meta[itemprop=image]）
+            img_meta = _first_or_none(
+                tile, By.CSS_SELECTOR,
+                ".product-tile__image.default.active meta[itemprop='image']"
+            ) or _first_or_none(
+                tile, By.CSS_SELECTOR,
+                ".product-tile__cover meta[itemprop='image']"
+            )
+            image_url = img_meta.get_attribute("content") if img_meta else None
+
+            # --- Quick Add 取尺码（无需进详情）
+            qa_btn = _first_or_none(
+                tile, By.CSS_SELECTOR,
+                ".product-tile__quickadd-container .tile-quickadd-btn[data-url]"
+            )
+            sizes = []
+            if qa_btn:
+                qa_url = urljoin(BASE, qa_btn.get_attribute("data-url"))
+                # 用 Selenium 打开这个片段路由，里面会有 label.pdp-size-select
+                current_url = driver.current_url
+                driver.get(qa_url)
                 try:
-                    el = item.find_element(By.CSS_SELECTOR, selector) if by == "css" else item.find_element(By.XPATH, selector)
-                    val = el.get_attribute("content")
-                    if not val:
-                        raw = el.text.strip()
-                        digits = "".join(ch for ch in raw if ch.isdigit())
-                        val = digits or None
-                    return val
+                    size_labels = WebDriverWait(driver, 10).until(
+                        EC.presence_of_all_elements_located((By.CSS_SELECTOR, "label.pdp-size-select"))
+                    )
+                    for lab in size_labels:
+                        # 可用：不含 is-disabled
+                        cls = lab.get_attribute("class") or ""
+                        sz = lab.get_attribute("data-size") or lab.text.strip()
+                        if sz and "is-disabled" not in cls:
+                            sizes.append(sz)
                 except Exception:
-                    return None
-
-            # ---- 图片 ----
-            image_url = None
-            try:
-                image_url = item.find_element(By.CSS_SELECTOR, "meta[itemprop='image']").get_attribute("content")
-            except Exception:
-                try:
-                    image_url = item.find_element(By.CSS_SELECTOR, "picture source").get_attribute("srcset").split()[0]
-                except Exception:
-                    image_url = None
-
-            # ---- 名称 ----
-            try:
-                product_name = item.find_element(By.CSS_SELECTOR, ".product-tile__name").text.strip()
-            except Exception:
-                product_name = ""
-
-            # ---- 链接 ----
-            product_link = None
-            try:
-                a = item.find_element(By.CSS_SELECTOR, ".product-tile__cover a[itemprop='url']")
-                href = a.get_attribute("href")
-                product_link = urljoin("https://www.patagonia.jp", href)
-            except Exception:
-                product_link = None
+                    pass
+                finally:
+                    # 回到列表页继续处理下一卡
+                    driver.get(current_url)
+                    WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, "div.product[data-pid] > product-tile"))
+                    )
 
             products.append({
                 "name": product_name,
-                "original_price": original_price,
-                "sale_price": sale_price,
+                "original_price": int(list_price),
+                "sale_price": int(sale_price),
                 "discount_percent": discount_percent,
                 "image_url": image_url,
                 "product_link": product_link,
-                "sizes": []
+                "sizes": sizes or []
             })
 
         except Exception as e:
-            print(f"Error processing item: {e}")
+            print(f"[tile error] {e}")
 
-    # 2) 进入详情页抓尺寸（放在商品循环之后，作用于 products）
-    for product in products:
-        if not product["product_link"]:
-            continue
-        try:
-            driver.get(product["product_link"])
-            # 等尺寸标签
-            size_elements = WebDriverWait(driver, 10).until(
-                EC.presence_of_all_elements_located((By.CSS_SELECTOR, "label.pdp-size-select"))
-            )
-            sizes = []
-            for size_element in size_elements:
-                size = size_element.get_attribute("data-size")
-                if not size:
-                    continue
-                # 跳过不可用
-                if "is-disabled" in size_element.get_attribute("class"):
-                    continue
-                sizes.append(size)
-            product["sizes"] = sizes
-        except (TimeoutException, NoSuchElementException) as e:
-            print(f"Error fetching sizes for {product.get('name','')}: {e}")
-
-    # 3) 生成 HTML
+    # --- 生成 HTML（与你原来一致）
     utc_now = datetime.utcnow()
     jst = pytz.timezone("Asia/Tokyo")
     execution_time = utc_now.astimezone(jst).strftime("%Y-%m-%d %H:%M:%S")
@@ -209,17 +191,17 @@ def fetch_discounted_products():
         <p class="timestamp">Generated on: {execution_time}</p>
     """
 
-    for product in products:
+    for p in products:
         html_content += f"""
         <div class="product">
-            <h2>{product['name']}</h2>
-            <a href="{product['product_link'] or '#'}" target="_blank">
-                <img src="{product['image_url'] or ''}" alt="{product['name']}">
+            <h2>{p['name']}</h2>
+            <a href="{p['product_link'] or '#'}" target="_blank">
+                <img src="{p['image_url'] or ''}" alt="{p['name']}">
             </a>
-            <p class="original-price">Original Price: {product['original_price'] or ''}</p>
-            <p class="price">Sale Price: {product['sale_price'] or ''}</p>
-            <p>Discount Percent: {product['discount_percent']}%</p>
-            <p class="sizes">Sizes: {" | ".join(product['sizes']) if product['sizes'] else "-"}</p>
+            <p class="original-price">Original Price: ¥ {p['original_price']:,}</p>
+            <p class="price">Sale Price: ¥ {p['sale_price']:,}</p>
+            <p>Discount Percent: {p['discount_percent']}%</p>
+            <p class="sizes">Sizes: {" | ".join(p['sizes']) if p['sizes'] else "-"}</p>
         </div>
         """
 
