@@ -12,6 +12,8 @@ import os
 from selenium.webdriver.chrome.options import Options
 from urllib.parse import urljoin
 
+BASE = "https://www.patagonia.jp"
+
 # 配置 Chrome 浏览器选项
 options = webdriver.ChromeOptions()
 
