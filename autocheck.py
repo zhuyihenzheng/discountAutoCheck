@@ -69,7 +69,7 @@ def fetch_discounted_products():
     driver.get(url)
 
     # 等待出现任一 product-tile
-    WebDriverWait(driver, 20).until(
+    WebDriverWait(driver, 50).until(
         EC.presence_of_element_located((By.CSS_SELECTOR, "div.product[data-pid] > product-tile"))
     )
 
