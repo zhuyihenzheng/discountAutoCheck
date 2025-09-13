@@ -65,7 +65,7 @@ def send_wechat_message(title, content):
         print("消息发送失败:", response.text)
 
 def fetch_discounted_products():
-    url = f"{BASE}/shop/web-specials?F25WO=&page=40"
+    url = f"{BASE}/shop/web-specials?F25WO=&page=30"
     driver.get(url)
 
     # 等待出现任一 product-tile
