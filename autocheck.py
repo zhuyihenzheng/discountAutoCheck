@@ -108,6 +108,7 @@ def fetch_discounted_products():
                 continue
 
             discount_percent = round((list_price - sale_price) * 100 / list_price, 1)
+            print(f"Found tiles: {discount_percent}")
             if discount_percent < 30:
                 # 不满足你设定的 30% 阈值
                 continue
