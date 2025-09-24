@@ -105,7 +105,7 @@ def fetch_discounted_products():
                 continue
 
             discount_percent = round((list_price - sale_price) * 100 / list_price, 1)
-            if discount_percent < 30:
+            if discount_percent < 50:
                 # 小于 30% 的不要
                 print(f"[skip-{idx}] discount {discount_percent}% < 30%")
                 continue
