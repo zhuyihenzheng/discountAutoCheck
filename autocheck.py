@@ -68,105 +68,107 @@ def fetch_discounted_products():
     url = f"{BASE}/shop/web-specials/mens?page=30"
     driver.get(url)
 
-    # 等待出现任一 product-tile
     WebDriverWait(driver, 100).until(
         EC.presence_of_element_located((By.CSS_SELECTOR, "div.product[data-pid] > product-tile"))
     )
 
-    # 每个商品卡：div.product[data-pid] 下的 <product-tile>
     tiles = driver.find_elements(By.CSS_SELECTOR, "div.product[data-pid] > product-tile")
     print(f"Found tiles: {len(tiles)}")
 
-    products = []
-    for tile in tiles:
+    # ---------- 第 1 轮：只收集主列表信息 + qa_url（不跳走页面） ----------
+    items = []
+    for idx, tile in enumerate(tiles):
         try:
-            # --- 名称
             name_el = _first_or_none(tile, By.CSS_SELECTOR, ".pdp-link .product-tile__name")
             product_name = name_el.text.strip() if name_el else ""
 
-            # --- 链接
             link_el = _first_or_none(tile, By.CSS_SELECTOR, ".pdp-link a.link[itemprop='url']")
             product_link = urljoin(BASE, link_el.get_attribute("href")) if link_el else None
 
-            # --- 价格（优先从 <product-tile-pricing> 的属性拿）
+            # 优先 <product-tile-pricing> 属性
             ptp = _first_or_none(tile, By.CSS_SELECTOR, "product-tile-pricing")
             sale_price = _num(ptp.get_attribute("sale-price")) if ptp else None
             list_price = _num(ptp.get_attribute("list-price")) if ptp else None
 
-            # 兜底：从当前激活色卡按钮 data-* 里拿
+            # 放宽兜底选择器：在整卡片里找任意带data价格的元素
             if sale_price is None or list_price is None:
-                active_swatch = _first_or_none(
-                    tile, By.CSS_SELECTOR,
-                    ".product-tile__pagination .product-tile__bullet .product-tile__colors.default.active"
+                any_price_el = _first_or_none(
+                    tile, By.CSS_SELECTOR, "[data-sale-price][data-list-price]"
                 )
-                if active_swatch:
-                    sale_price = sale_price or _num(active_swatch.get_attribute("data-sale-price"))
-                    list_price = list_price or _num(active_swatch.get_attribute("data-list-price"))
+                if any_price_el:
+                    sale_price = sale_price or _num(any_price_el.get_attribute("data-sale-price"))
+                    list_price = list_price or _num(any_price_el.get_attribute("data-list-price"))
 
             if not sale_price or not list_price or list_price <= 0:
-                # 价格异常则跳过
+                # 价格取不到就跳过
+                print(f"[skip-{idx}] price missing")
                 continue
 
             discount_percent = round((list_price - sale_price) * 100 / list_price, 1)
-            print(f"Found tiles: {discount_percent}")
             if discount_percent < 30:
-                # 不满足你设定的 30% 阈值
+                # 小于 30% 的不要
+                print(f"[skip-{idx}] discount {discount_percent}% < 30%")
                 continue
 
-            # --- 图片（优先当前激活颜色的 meta[itemprop=image]）
-            img_meta = _first_or_none(
-                tile, By.CSS_SELECTOR,
-                ".product-tile__image.default.active meta[itemprop='image']"
+            # 图片
+            img_meta = (_first_or_none(
+                tile, By.CSS_SELECTOR, ".product-tile__image.default.active meta[itemprop='image']"
             ) or _first_or_none(
-                tile, By.CSS_SELECTOR,
-                ".product-tile__cover meta[itemprop='image']"
-            )
+                tile, By.CSS_SELECTOR, ".product-tile__cover meta[itemprop='image']"
+            ))
             image_url = img_meta.get_attribute("content") if img_meta else None
 
-            # --- Quick Add 取尺码（无需进详情）
+            # 记录 quick add 片段地址（不要现在跳）
             qa_btn = _first_or_none(
                 tile, By.CSS_SELECTOR,
                 ".product-tile__quickadd-container .tile-quickadd-btn[data-url]"
             )
-            sizes = []
-            if qa_btn:
-                qa_url = urljoin(BASE, qa_btn.get_attribute("data-url"))
-                # 用 Selenium 打开这个片段路由，里面会有 label.pdp-size-select
-                current_url = driver.current_url
-                driver.get(qa_url)
-                try:
-                    size_labels = WebDriverWait(driver, 10).until(
-                        EC.presence_of_all_elements_located((By.CSS_SELECTOR, "label.pdp-size-select"))
-                    )
-                    for lab in size_labels:
-                        # 可用：不含 is-disabled
-                        cls = lab.get_attribute("class") or ""
-                        sz = lab.get_attribute("data-size") or lab.text.strip()
-                        if sz and "is-disabled" not in cls:
-                            sizes.append(sz)
-                except Exception:
-                    pass
-                finally:
-                    # 回到列表页继续处理下一卡
-                    driver.get(current_url)
-                    WebDriverWait(driver, 10).until(
-                        EC.presence_of_element_located((By.CSS_SELECTOR, "div.product[data-pid] > product-tile"))
-                    )
+            qa_url = urljoin(BASE, qa_btn.get_attribute("data-url")) if qa_btn else None
 
-            products.append({
+            items.append({
                 "name": product_name,
                 "original_price": int(list_price),
                 "sale_price": int(sale_price),
                 "discount_percent": discount_percent,
                 "image_url": image_url,
                 "product_link": product_link,
-                "sizes": sizes or []
+                "qa_url": qa_url,    # 第二轮再用
             })
-
         except Exception as e:
-            print(f"[tile error] {e}")
+            print(f"[collect error-{idx}] {e}")
 
-    # --- 生成 HTML（与你原来一致）
+    # ---------- 第 2 轮：为每个 item 在新标签页里采集尺码 ----------
+    for it in items:
+        sizes = []
+        qa_url = it.get("qa_url")
+        if not qa_url:
+            it["sizes"] = sizes
+            continue
+        try:
+            # 在新标签打开，不刷新主列表页
+            driver.execute_script("window.open(arguments[0], '_blank');", qa_url)
+            driver.switch_to.window(driver.window_handles[-1])
+            try:
+                size_labels = WebDriverWait(driver, 10).until(
+                    EC.presence_of_all_elements_located((By.CSS_SELECTOR, "label.pdp-size-select"))
+                )
+                for lab in size_labels:
+                    cls = lab.get_attribute("class") or ""
+                    sz = lab.get_attribute("data-size") or lab.text.strip()
+                    if sz and "is-disabled" not in cls:
+                        sizes.append(sz)
+            except TimeoutException:
+                pass
+        except Exception as e:
+            print(f"[sizes error] {e}")
+        finally:
+            # 关闭新标签，回到主标签
+            if len(driver.window_handles) > 1:
+                driver.close()
+                driver.switch_to.window(driver.window_handles[0])
+        it["sizes"] = sizes
+
+    # ---------- 生成 HTML ----------
     utc_now = datetime.utcnow()
     jst = pytz.timezone("Asia/Tokyo")
     execution_time = utc_now.astimezone(jst).strftime("%Y-%m-%d %H:%M:%S")
@@ -194,7 +196,7 @@ def fetch_discounted_products():
         <p class="timestamp">Generated on: {execution_time}</p>
     """
 
-    for p in products:
+    for p in items:
         html_content += f"""
         <div class="product">
             <h2>{p['name']}</h2>
@@ -212,9 +214,7 @@ def fetch_discounted_products():
     </body>
     </html>
     """
-
     return html_content
-
 
 def upload_to_gist(content):
     GIST_TOKEN = os.getenv("GIST_TOKEN")
