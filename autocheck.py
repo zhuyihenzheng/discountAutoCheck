@@ -234,6 +234,11 @@ def fetch_discounted_products():
     # ---------- 第 1 轮：只收集主列表信息 + qa_url（不跳走页面） ----------
     items = []
     seen_pids = set()
+    selector_wait = (
+        "div.product[data-pid], "
+        "div.product-grid__tile[data-pid], "
+        "div[data-pid].product-grid__tile"
+    )
     for page in range(1, max_pages + 1):
         url = f"{BASE}/shop/web-specials/men?page={page}"
         print(f"[page {page}] fetching {url}")
@@ -245,13 +250,19 @@ def fetch_discounted_products():
 
         try:
             WebDriverWait(driver, wait_timeout).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "div.product[data-pid] > product-tile"))
+                EC.presence_of_element_located((By.CSS_SELECTOR, selector_wait))
             )
         except TimeoutException:
             print(f"[page {page}] wait timeout, stop paging")
             break
 
-        tiles = driver.find_elements(By.CSS_SELECTOR, "div.product[data-pid] > product-tile")
+        tiles = driver.find_elements(By.CSS_SELECTOR, "div.product[data-pid]")
+        if not tiles:
+            tiles = driver.find_elements(By.CSS_SELECTOR, "div.product-grid__tile[data-pid]")
+        if not tiles:
+            tiles = driver.find_elements(By.CSS_SELECTOR, "div[data-pid].product-grid__tile")
+        if not tiles:
+            tiles = driver.find_elements(By.CSS_SELECTOR, "div.product[data-pid] > product-tile")
         print(f"[page {page}] found tiles: {len(tiles)}")
         if not tiles:
             print(f"[page {page}] no tiles, stop paging")
