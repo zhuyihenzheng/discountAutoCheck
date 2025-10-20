@@ -229,20 +229,21 @@ def send_wechat_message(title, content):
 
 def fetch_discounted_products():
     min_discount = 50
-    max_pages = 5
+    max_pages = None  # None 表示自动遍历直至没有更多商品
     wait_timeout = 30
     delay_between_pages = 1.5
 
     # ---------- 第 1 轮：只收集主列表信息 + qa_url（不跳走页面） ----------
     items = []
     seen_pids = set()
-    selector_wait = (
+    wait_selector = (
         "div.product[data-pid], "
         "div.product-grid__tile[data-pid], "
         "div[data-pid].product-grid__tile"
     )
-    for page in range(1, max_pages + 1):
-        url = f"{BASE}/shop/web-specials/mens?page={page}"
+    page = 1
+    while True:
+        url = f"{BASE}/shop/web-specials/men?page={page}"
         print(f"[page {page}] fetching {url}")
         try:
             driver.get(url)
@@ -257,7 +258,7 @@ def fetch_discounted_products():
 
         try:
             WebDriverWait(driver, wait_timeout).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, selector_wait))
+                EC.presence_of_element_located((By.CSS_SELECTOR, wait_selector))
             )
         except TimeoutException:
             print(f"[page {page}] wait timeout, stop paging")
@@ -360,8 +361,11 @@ def fetch_discounted_products():
             except Exception as e:
                 print(f"[collect error page {page} #{idx}] {e}")
 
-        if page < max_pages:
-            time.sleep(delay_between_pages)
+        page += 1
+        if max_pages is not None and page > max_pages:
+            print("[paging] reached max_pages limit, stop")
+            break
+        time.sleep(delay_between_pages)
 
     # ---------- 第 2 轮：为每个 item 在新标签页里采集尺码 ----------
     main_window = driver.current_window_handle
