@@ -243,6 +243,7 @@ def fetch_discounted_products():
     )
     page = 1
     while True:
+        prev_seen_count = len(seen_pids)
         url = f"{BASE}/shop/web-specials/mens?page={page}"
         print(f"[page {page}] fetching {url}")
         try:
@@ -360,6 +361,11 @@ def fetch_discounted_products():
                     seen_pids.add(pid)
             except Exception as e:
                 print(f"[collect error page {page} #{idx}] {e}")
+
+        new_seen_count = len(seen_pids)
+        if new_seen_count == prev_seen_count:
+            print(f"[paging] no new products found on page {page}, stop")
+            break
 
         page += 1
         if max_pages is not None and page > max_pages:
