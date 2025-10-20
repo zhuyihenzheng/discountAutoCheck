@@ -376,21 +376,26 @@ def fetch_discounted_products():
         time.sleep(delay_between_pages)
 
     # ---------- 第 2 轮：为每个 item 在新标签页里采集尺码 ----------
-    main_window = driver.current_window_handle
+    # NOTE: 按照当前需求，尺码请求太多，所以先跳过这一步；
+    #       如需恢复，只需去掉注释并重新启用下面的逻辑。
+    #
+    # main_window = driver.current_window_handle
+    # for it in items:
+    #     sizes = []
+    #     qa_url = it.get("qa_url")
+    #     product_link = it.get("product_link")
+    #
+    #     # 先尝试直接在商品详情页抓取尺码
+    #     sizes = _fetch_sizes_from_product_page(product_link, main_window)
+    #
+    #     # 兜底：如果详情页取不到，再尝试 quick add 片段
+    #     if not sizes and qa_url:
+    #         sizes = _fetch_sizes_from_quick_add(qa_url)
+    #         print(f"[sizes quickadd] collected {len(sizes)} sizes for {qa_url}")
+    #
+    #     it["sizes"] = sizes
     for it in items:
-        sizes = []
-        qa_url = it.get("qa_url")
-        product_link = it.get("product_link")
-
-        # 先尝试直接在商品详情页抓取尺码
-        sizes = _fetch_sizes_from_product_page(product_link, main_window)
-
-        # 兜底：如果详情页取不到，再尝试 quick add 片段
-        if not sizes and qa_url:
-            sizes = _fetch_sizes_from_quick_add(qa_url)
-            print(f"[sizes quickadd] collected {len(sizes)} sizes for {qa_url}")
-
-        it["sizes"] = sizes
+        it["sizes"] = []
 
     # ---------- 生成 HTML ----------
     utc_now = datetime.utcnow()
