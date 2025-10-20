@@ -242,7 +242,7 @@ def fetch_discounted_products():
         "div[data-pid].product-grid__tile"
     )
     for page in range(1, max_pages + 1):
-        url = f"{BASE}/shop/web-specials/men?page={page}"
+        url = f"{BASE}/shop/web-specials/mens?page={page}"
         print(f"[page {page}] fetching {url}")
         try:
             driver.get(url)
