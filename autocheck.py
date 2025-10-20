@@ -182,6 +182,7 @@ def _fetch_sizes_from_product_page(product_url, main_window):
         return []
     try:
         driver.execute_script("window.open(arguments[0], '_blank');", product_url)
+        print(f"[sizes product] open {product_url}")
     except Exception as exc:
         print(f"[sizes product] failed to open tab for {product_url}: {exc}")
         return []
@@ -194,8 +195,9 @@ def _fetch_sizes_from_product_page(product_url, main_window):
                 lambda d: bool(_collect_sizes_from_current_page(d))
             )
         except TimeoutException:
-            pass
+            print(f"[sizes product] timeout collecting sizes for {product_url}")
         sizes = _collect_sizes_from_current_page(driver)
+        print(f"[sizes product] collected {len(sizes)} sizes for {product_url}")
     finally:
         try:
             driver.close()
@@ -247,6 +249,11 @@ def fetch_discounted_products():
         except Exception as exc:
             print(f"[page {page}] navigation error: {exc}")
             break
+        try:
+            ready_state = driver.execute_script("return document.readyState")
+            print(f"[page {page}] readyState = {ready_state}")
+        except Exception as exc:
+            print(f"[page {page}] readyState fetch error: {exc}")
 
         try:
             WebDriverWait(driver, wait_timeout).until(
@@ -257,15 +264,35 @@ def fetch_discounted_products():
             break
 
         tiles = driver.find_elements(By.CSS_SELECTOR, "div.product[data-pid]")
+        print(f"[page {page}] tiles(div.product[data-pid]) = {len(tiles)}")
         if not tiles:
             tiles = driver.find_elements(By.CSS_SELECTOR, "div.product-grid__tile[data-pid]")
+            print(f"[page {page}] tiles(div.product-grid__tile[data-pid]) = {len(tiles)}")
         if not tiles:
             tiles = driver.find_elements(By.CSS_SELECTOR, "div[data-pid].product-grid__tile")
+            print(f"[page {page}] tiles(div[data-pid].product-grid__tile) = {len(tiles)}")
         if not tiles:
             tiles = driver.find_elements(By.CSS_SELECTOR, "div.product[data-pid] > product-tile")
-        print(f"[page {page}] found tiles: {len(tiles)}")
+            print(f"[page {page}] tiles(div.product[data-pid] > product-tile) = {len(tiles)}")
+        if not tiles:
+            shadow_tiles = driver.find_elements(By.CSS_SELECTOR, "product-tile")
+            print(f"[page {page}] tiles(product-tile) = {len(shadow_tiles)}")
+            if shadow_tiles:
+                try:
+                    first_shadow = shadow_tiles[0]
+                    outer_html = first_shadow.get_attribute("outerHTML")
+                    snippet = outer_html[:2000]
+                    print(f"[page {page}] shadow product tile snippet:\n{snippet}")
+                except Exception:
+                    pass
+        print(f"[page {page}] final tiles count: {len(tiles)}")
         if not tiles:
             print(f"[page {page}] no tiles, stop paging")
+            try:
+                snippet = driver.page_source[:2000]
+                print(f"[page {page}] page source snippet:\n{snippet}")
+            except Exception:
+                pass
             break
 
         for idx, tile in enumerate(tiles, start=1):
@@ -349,6 +376,7 @@ def fetch_discounted_products():
         # 兜底：如果详情页取不到，再尝试 quick add 片段
         if not sizes and qa_url:
             sizes = _fetch_sizes_from_quick_add(qa_url)
+            print(f"[sizes quickadd] collected {len(sizes)} sizes for {qa_url}")
 
         it["sizes"] = sizes
 
