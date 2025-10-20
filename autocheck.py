@@ -228,7 +228,7 @@ def send_wechat_message(title, content):
         print("消息发送失败:", response.text)
 
 def fetch_discounted_products():
-    min_discount = 50
+    min_discount = 30
     max_pages = None  # None 表示自动遍历直至没有更多商品
     wait_timeout = 30
     delay_between_pages = 1.5
@@ -244,7 +244,7 @@ def fetch_discounted_products():
     page = 1
     prev_tiles_count = 0
     while True:
-        url = f"{BASE}/shop/web-specials/mens?page={page}"
+        url = f"{BASE}/shop/web-specials?page={page}"
         print(f"[page {page}] fetching {url}")
         try:
             driver.get(url)
@@ -328,7 +328,7 @@ def fetch_discounted_products():
                     continue
 
                 discount_percent = round((list_price - sale_price) * 100 / list_price, 1)
-                if discount_percent < min_discount:
+                if discount_percent <= min_discount:
                     print(f"[skip page {page} #{idx}] discount {discount_percent}% < {min_discount}%")
                     continue
 
