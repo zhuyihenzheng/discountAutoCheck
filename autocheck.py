@@ -243,7 +243,7 @@ def fetch_discounted_products():
     )
     page = 1
     while True:
-        url = f"{BASE}/shop/web-specials/men?page={page}"
+        url = f"{BASE}/shop/web-specials/mens?page={page}"
         print(f"[page {page}] fetching {url}")
         try:
             driver.get(url)
