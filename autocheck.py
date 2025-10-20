@@ -297,71 +297,6 @@ def fetch_discounted_products():
                 pass
             break
 
-        for idx, tile in enumerate(tiles, start=1):
-            try:
-                pid = tile.get_attribute("data-pid")
-                if pid and pid in seen_pids:
-                    continue
-
-                name_el = _first_or_none(tile, By.CSS_SELECTOR, ".pdp-link .product-tile__name")
-                product_name = name_el.text.strip() if name_el else ""
-
-                link_el = _first_or_none(tile, By.CSS_SELECTOR, ".pdp-link a.link[itemprop='url']")
-                product_link = urljoin(BASE, link_el.get_attribute("href")) if link_el else None
-
-                # 优先 <product-tile-pricing> 属性
-                ptp = _first_or_none(tile, By.CSS_SELECTOR, "product-tile-pricing")
-                sale_price = _num(ptp.get_attribute("sale-price")) if ptp else None
-                list_price = _num(ptp.get_attribute("list-price")) if ptp else None
-
-                # 放宽兜底选择器：在整卡片里找任意带data价格的元素
-                if sale_price is None or list_price is None:
-                    any_price_el = _first_or_none(
-                        tile, By.CSS_SELECTOR, "[data-sale-price][data-list-price]"
-                    )
-                    if any_price_el:
-                        sale_price = sale_price or _num(any_price_el.get_attribute("data-sale-price"))
-                        list_price = list_price or _num(any_price_el.get_attribute("data-list-price"))
-
-                if not sale_price or not list_price or list_price <= 0:
-                    print(f"[skip page {page} #{idx}] price missing")
-                    continue
-
-                discount_percent = round((list_price - sale_price) * 100 / list_price, 1)
-                if discount_percent <= min_discount:
-                    print(f"[skip page {page} #{idx}] discount {discount_percent}% < {min_discount}%")
-                    continue
-
-                # 图片
-                img_meta = (_first_or_none(
-                    tile, By.CSS_SELECTOR, ".product-tile__image.default.active meta[itemprop='image']"
-                ) or _first_or_none(
-                    tile, By.CSS_SELECTOR, ".product-tile__cover meta[itemprop='image']"
-                ))
-                image_url = img_meta.get_attribute("content") if img_meta else None
-
-                # 记录 quick add 片段地址（不要现在跳）
-                qa_btn = _first_or_none(
-                    tile, By.CSS_SELECTOR,
-                    ".product-tile__quickadd-container .tile-quickadd-btn[data-url]"
-                )
-                qa_url = urljoin(BASE, qa_btn.get_attribute("data-url")) if qa_btn else None
-
-                items.append({
-                    "pid": pid,
-                    "name": product_name,
-                    "original_price": int(list_price),
-                    "sale_price": int(sale_price),
-                    "discount_percent": discount_percent,
-                    "image_url": image_url,
-                    "product_link": product_link,
-                    "qa_url": qa_url,    # 第二轮再用
-                })
-                if pid:
-                    seen_pids.add(pid)
-            except Exception as e:
-                print(f"[collect error page {page} #{idx}] {e}")
-
         new_tiles_count = len(tiles)
         if new_tiles_count == prev_tiles_count:
             print(f"[paging] no new products found on page {page}, stop")
@@ -370,10 +305,72 @@ def fetch_discounted_products():
         prev_tiles_count = new_tiles_count
 
         page += 1
-        if max_pages is not None and page > max_pages:
-            print("[paging] reached max_pages limit, stop")
-            break
         time.sleep(delay_between_pages)
+
+    for idx, tile in enumerate(tiles, start=1):
+        try:
+            pid = tile.get_attribute("data-pid")
+            if pid and pid in seen_pids:
+                continue
+
+            name_el = _first_or_none(tile, By.CSS_SELECTOR, ".pdp-link .product-tile__name")
+            product_name = name_el.text.strip() if name_el else ""
+
+            link_el = _first_or_none(tile, By.CSS_SELECTOR, ".pdp-link a.link[itemprop='url']")
+            product_link = urljoin(BASE, link_el.get_attribute("href")) if link_el else None
+
+            # 优先 <product-tile-pricing> 属性
+            ptp = _first_or_none(tile, By.CSS_SELECTOR, "product-tile-pricing")
+            sale_price = _num(ptp.get_attribute("sale-price")) if ptp else None
+            list_price = _num(ptp.get_attribute("list-price")) if ptp else None
+
+            # 放宽兜底选择器：在整卡片里找任意带data价格的元素
+            if sale_price is None or list_price is None:
+                any_price_el = _first_or_none(
+                    tile, By.CSS_SELECTOR, "[data-sale-price][data-list-price]"
+                )
+                if any_price_el:
+                    sale_price = sale_price or _num(any_price_el.get_attribute("data-sale-price"))
+                    list_price = list_price or _num(any_price_el.get_attribute("data-list-price"))
+
+            if not sale_price or not list_price or list_price <= 0:
+                print(f"[skip page {page} #{idx}] price missing")
+                continue
+
+            discount_percent = round((list_price - sale_price) * 100 / list_price, 1)
+            if discount_percent <= min_discount:
+                print(f"[skip page {page} #{idx}] discount {discount_percent}% < {min_discount}%")
+                continue
+
+            # 图片
+            img_meta = (_first_or_none(
+                tile, By.CSS_SELECTOR, ".product-tile__image.default.active meta[itemprop='image']"
+            ) or _first_or_none(
+                tile, By.CSS_SELECTOR, ".product-tile__cover meta[itemprop='image']"
+            ))
+            image_url = img_meta.get_attribute("content") if img_meta else None
+
+            # 记录 quick add 片段地址（不要现在跳）
+            qa_btn = _first_or_none(
+                tile, By.CSS_SELECTOR,
+                ".product-tile__quickadd-container .tile-quickadd-btn[data-url]"
+            )
+            qa_url = urljoin(BASE, qa_btn.get_attribute("data-url")) if qa_btn else None
+
+            items.append({
+                "pid": pid,
+                "name": product_name,
+                "original_price": int(list_price),
+                "sale_price": int(sale_price),
+                "discount_percent": discount_percent,
+                "image_url": image_url,
+                "product_link": product_link,
+                "qa_url": qa_url,    # 第二轮再用
+            })
+            if pid:
+                seen_pids.add(pid)
+        except Exception as e:
+            print(f"[collect error page {page} #{idx}] {e}")
 
     # ---------- 第 2 轮：为每个 item 在新标签页里采集尺码 ----------
     # NOTE: 按照当前需求，尺码请求太多，所以先跳过这一步；
