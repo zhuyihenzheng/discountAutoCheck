@@ -1,18 +1,30 @@
-import requests
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.common.by import By
-from selenium.common.exceptions import NoSuchElementException, TimeoutException
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
+import re
 import time
 from datetime import datetime
-import pytz
-import os
-from selenium.webdriver.chrome.options import Options
 from urllib.parse import urljoin
 
+import os
+import pytz
+import requests
+from selenium import webdriver
+from selenium.common.exceptions import TimeoutException
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
+
 BASE = "https://www.patagonia.jp"
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.88 Safari/537.36"
+)
+
+SIZE_SELECTORS = (
+    "[data-attr='size'] button:not([disabled])",
+    "fieldset[data-attr='size'] button:not([disabled])",
+    "button.pdp-size-select:not(.is-disabled)",
+    "label.pdp-size-select:not(.is-disabled)",
+    "[data-size]:not([disabled])",
+)
 
 # 配置 Chrome 浏览器选项
 options = webdriver.ChromeOptions()
@@ -24,7 +36,7 @@ options.add_argument("start-maximized")          # 最大化窗口
 options.add_argument("disable-infobars")
 options.add_argument("--disable-extensions")
 options.add_argument("--headless=new")
-options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.88 Safari/537.36")
+options.add_argument(f"user-agent={DEFAULT_USER_AGENT}")
 #driver_path = "/usr/local/bin/chromedriver-linux64/chromedriver"
 #service = Service(driver_path)
 #driver = webdriver.Chrome(service=service, options=options)
@@ -48,6 +60,157 @@ def _first_or_none(root, by, sel):
         return None
 
 
+def _is_disabled(element):
+    cls = (element.get_attribute("class") or "").lower()
+    aria_disabled = (element.get_attribute("aria-disabled") or "").lower()
+    data_available = (element.get_attribute("data-available") or "").lower()
+    disabled_attr = element.get_attribute("disabled")
+    if "disabled" in cls or "unavailable" in cls:
+        return True
+    if aria_disabled in ("true", "1"):
+        return True
+    if data_available in ("false", "0"):
+        return True
+    return disabled_attr is not None
+
+
+def _extract_size_text(element):
+    candidates = (
+        element.get_attribute("data-size"),
+        element.get_attribute("data-value"),
+        element.get_attribute("value"),
+        element.get_attribute("aria-label"),
+        element.text,
+    )
+    for cand in candidates:
+        if not cand:
+            continue
+        cand = cand.strip()
+        if not cand:
+            continue
+        if cand.lower().startswith("サイズ"):
+            parts = cand.split()
+            cand = parts[-1] if parts else cand
+        return cand
+    return None
+
+
+def _collect_sizes_from_current_page(driver):
+    seen = set()
+    sizes = []
+    for selector in SIZE_SELECTORS:
+        try:
+            elements = driver.find_elements(By.CSS_SELECTOR, selector)
+        except Exception:
+            continue
+        for el in elements:
+            try:
+                if _is_disabled(el):
+                    continue
+                size = _extract_size_text(el)
+                if not size:
+                    continue
+                if size not in seen:
+                    seen.add(size)
+                    sizes.append(size)
+            except Exception:
+                continue
+        if sizes:
+            break
+    return sizes
+
+
+def _parse_sizes_from_html(html):
+    seen = set()
+    sizes = []
+    label_pattern = re.compile(
+        r"<label[^>]*class=\"[^\"]*pdp-size-select[^\"]*\"[^>]*>(.*?)</label>",
+        re.IGNORECASE | re.DOTALL,
+    )
+    for block in label_pattern.findall(html):
+        if "is-disabled" in block.lower():
+            continue
+        size = None
+        match = re.search(r'data-size="([^"]+)"', block)
+        if match:
+            size = match.group(1).strip()
+        if not size:
+            match = re.search(r'data-value="([^"]+)"', block)
+            if match:
+                size = match.group(1).strip()
+        if not size:
+            match = re.search(r">([^<>]+)</", block)
+            if match:
+                size = match.group(1).strip()
+        if size and size not in seen:
+            seen.add(size)
+            sizes.append(size)
+    if sizes:
+        return sizes
+    # 兜底：尝试匹配任意 data-size / data-value
+    for match in re.finditer(r'data-(?:size|value)="([^"]+)"', html):
+        size = match.group(1).strip()
+        if size and size not in seen:
+            seen.add(size)
+            sizes.append(size)
+    return sizes
+
+
+def _fetch_sizes_from_quick_add(qa_url):
+    if not qa_url:
+        return []
+    try:
+        response = requests.get(
+            qa_url,
+            headers={
+                "User-Agent": DEFAULT_USER_AGENT,
+                "X-Requested-With": "XMLHttpRequest",
+            },
+            timeout=15,
+        )
+        if response.status_code != 200:
+            print(f"[sizes quickadd] status {response.status_code} for {qa_url}")
+            return []
+        return _parse_sizes_from_html(response.text)
+    except Exception as exc:
+        print(f"[sizes quickadd] error fetching {qa_url}: {exc}")
+        return []
+
+
+def _fetch_sizes_from_product_page(product_url, main_window):
+    if not product_url:
+        return []
+    try:
+        driver.execute_script("window.open(arguments[0], '_blank');", product_url)
+        print(f"[sizes product] open {product_url}")
+    except Exception as exc:
+        print(f"[sizes product] failed to open tab for {product_url}: {exc}")
+        return []
+
+    sizes = []
+    try:
+        driver.switch_to.window(driver.window_handles[-1])
+        try:
+            WebDriverWait(driver, 15).until(
+                lambda d: bool(_collect_sizes_from_current_page(d))
+            )
+        except TimeoutException:
+            print(f"[sizes product] timeout collecting sizes for {product_url}")
+        sizes = _collect_sizes_from_current_page(driver)
+        print(f"[sizes product] collected {len(sizes)} sizes for {product_url}")
+    finally:
+        try:
+            driver.close()
+        except Exception:
+            pass
+        try:
+            driver.switch_to.window(main_window)
+        except Exception:
+            # 如果句柄顺序变化则退回第一个句柄
+            driver.switch_to.window(driver.window_handles[0])
+    return sizes
+
+
 def send_wechat_message(title, content):
     # 替换为你的 Server酱 SendKey
     send_key = os.getenv("WECHAT_SENDKEY")
@@ -65,20 +228,91 @@ def send_wechat_message(title, content):
         print("消息发送失败:", response.text)
 
 def fetch_discounted_products():
-    url = f"{BASE}/shop/web-specials/women?page=30"
-    driver.get(url)
-
-    WebDriverWait(driver, 100).until(
-        EC.presence_of_element_located((By.CSS_SELECTOR, "div.product[data-pid] > product-tile"))
-    )
-
-    tiles = driver.find_elements(By.CSS_SELECTOR, "div.product[data-pid] > product-tile")
-    print(f"Found tiles: {len(tiles)}")
+    min_discount = 30
+    max_pages = None  # None 表示自动遍历直至没有更多商品
+    wait_timeout = 30
+    delay_between_pages = 1.5
 
     # ---------- 第 1 轮：只收集主列表信息 + qa_url（不跳走页面） ----------
     items = []
-    for idx, tile in enumerate(tiles):
+    seen_pids = set()
+    wait_selector = (
+        "div.product[data-pid], "
+        "div.product-grid__tile[data-pid], "
+        "div[data-pid].product-grid__tile"
+    )
+    page = 1
+    prev_tiles_count = 0
+    while True:
+        url = f"{BASE}/shop/web-specials?page={page}"
+        print(f"[page {page}] fetching {url}")
         try:
+            driver.get(url)
+        except Exception as exc:
+            print(f"[page {page}] navigation error: {exc}")
+            break
+        try:
+            ready_state = driver.execute_script("return document.readyState")
+            print(f"[page {page}] readyState = {ready_state}")
+        except Exception as exc:
+            print(f"[page {page}] readyState fetch error: {exc}")
+
+        try:
+            WebDriverWait(driver, wait_timeout).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, wait_selector))
+            )
+        except TimeoutException:
+            print(f"[page {page}] wait timeout, stop paging")
+            break
+
+        tiles = driver.find_elements(By.CSS_SELECTOR, "div.product[data-pid]")
+        print(f"[page {page}] tiles(div.product[data-pid]) = {len(tiles)}")
+        if not tiles:
+            tiles = driver.find_elements(By.CSS_SELECTOR, "div.product-grid__tile[data-pid]")
+            print(f"[page {page}] tiles(div.product-grid__tile[data-pid]) = {len(tiles)}")
+        if not tiles:
+            tiles = driver.find_elements(By.CSS_SELECTOR, "div[data-pid].product-grid__tile")
+            print(f"[page {page}] tiles(div[data-pid].product-grid__tile) = {len(tiles)}")
+        if not tiles:
+            tiles = driver.find_elements(By.CSS_SELECTOR, "div.product[data-pid] > product-tile")
+            print(f"[page {page}] tiles(div.product[data-pid] > product-tile) = {len(tiles)}")
+        if not tiles:
+            shadow_tiles = driver.find_elements(By.CSS_SELECTOR, "product-tile")
+            print(f"[page {page}] tiles(product-tile) = {len(shadow_tiles)}")
+            if shadow_tiles:
+                try:
+                    first_shadow = shadow_tiles[0]
+                    outer_html = first_shadow.get_attribute("outerHTML")
+                    snippet = outer_html[:2000]
+                    print(f"[page {page}] shadow product tile snippet:\n{snippet}")
+                except Exception:
+                    pass
+        print(f"[page {page}] final tiles count: {len(tiles)}")
+        if not tiles:
+            print(f"[page {page}] no tiles, stop paging")
+            try:
+                snippet = driver.page_source[:2000]
+                print(f"[page {page}] page source snippet:\n{snippet}")
+            except Exception:
+                pass
+            break
+
+        new_tiles_count = len(tiles)
+        if new_tiles_count == prev_tiles_count:
+            print(f"[paging] no new products found on page {page}, stop")
+            break
+
+        prev_tiles_count = new_tiles_count
+
+        page += 1
+        time.sleep(delay_between_pages)
+
+    for idx, tile in enumerate(tiles, start=1):
+        try:
+            pid = tile.get_attribute("data-pid")
+            if pid and pid in seen_pids:
+                continue
+
             name_el = _first_or_none(tile, By.CSS_SELECTOR, ".pdp-link .product-tile__name")
             product_name = name_el.text.strip() if name_el else ""
 
@@ -100,14 +334,12 @@ def fetch_discounted_products():
                     list_price = list_price or _num(any_price_el.get_attribute("data-list-price"))
 
             if not sale_price or not list_price or list_price <= 0:
-                # 价格取不到就跳过
-                print(f"[skip-{idx}] price missing")
+                print(f"[skip page {page} #{idx}] price missing")
                 continue
 
             discount_percent = round((list_price - sale_price) * 100 / list_price, 1)
-            if discount_percent < 50:
-                # 小于 30% 的不要
-                print(f"[skip-{idx}] discount {discount_percent}% < 30%")
+            if discount_percent <= min_discount:
+                print(f"[skip page {page} #{idx}] discount {discount_percent}% < {min_discount}%")
                 continue
 
             # 图片
@@ -126,6 +358,7 @@ def fetch_discounted_products():
             qa_url = urljoin(BASE, qa_btn.get_attribute("data-url")) if qa_btn else None
 
             items.append({
+                "pid": pid,
                 "name": product_name,
                 "original_price": int(list_price),
                 "sale_price": int(sale_price),
@@ -134,39 +367,32 @@ def fetch_discounted_products():
                 "product_link": product_link,
                 "qa_url": qa_url,    # 第二轮再用
             })
+            if pid:
+                seen_pids.add(pid)
         except Exception as e:
-            print(f"[collect error-{idx}] {e}")
+            print(f"[collect error page {page} #{idx}] {e}")
 
     # ---------- 第 2 轮：为每个 item 在新标签页里采集尺码 ----------
+    # NOTE: 按照当前需求，尺码请求太多，所以先跳过这一步；
+    #       如需恢复，只需去掉注释并重新启用下面的逻辑。
+    #
+    # main_window = driver.current_window_handle
+    # for it in items:
+    #     sizes = []
+    #     qa_url = it.get("qa_url")
+    #     product_link = it.get("product_link")
+    #
+    #     # 先尝试直接在商品详情页抓取尺码
+    #     sizes = _fetch_sizes_from_product_page(product_link, main_window)
+    #
+    #     # 兜底：如果详情页取不到，再尝试 quick add 片段
+    #     if not sizes and qa_url:
+    #         sizes = _fetch_sizes_from_quick_add(qa_url)
+    #         print(f"[sizes quickadd] collected {len(sizes)} sizes for {qa_url}")
+    #
+    #     it["sizes"] = sizes
     for it in items:
-        sizes = []
-        qa_url = it.get("qa_url")
-        if not qa_url:
-            it["sizes"] = sizes
-            continue
-        try:
-            # 在新标签打开，不刷新主列表页
-            driver.execute_script("window.open(arguments[0], '_blank');", qa_url)
-            driver.switch_to.window(driver.window_handles[-1])
-            try:
-                size_labels = WebDriverWait(driver, 10).until(
-                    EC.presence_of_all_elements_located((By.CSS_SELECTOR, "label.pdp-size-select"))
-                )
-                for lab in size_labels:
-                    cls = lab.get_attribute("class") or ""
-                    sz = lab.get_attribute("data-size") or lab.text.strip()
-                    if sz and "is-disabled" not in cls:
-                        sizes.append(sz)
-            except TimeoutException:
-                pass
-        except Exception as e:
-            print(f"[sizes error] {e}")
-        finally:
-            # 关闭新标签，回到主标签
-            if len(driver.window_handles) > 1:
-                driver.close()
-                driver.switch_to.window(driver.window_handles[0])
-        it["sizes"] = sizes
+        it["sizes"] = []
 
     # ---------- 生成 HTML ----------
     utc_now = datetime.utcnow()
