@@ -1,3 +1,4 @@
+import json
 import re
 import time
 from datetime import datetime
@@ -7,7 +8,7 @@ import os
 import pytz
 import requests
 from selenium import webdriver
-from selenium.common.exceptions import TimeoutException
+from selenium.common.exceptions import NoSuchElementException, TimeoutException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
@@ -132,6 +133,26 @@ def _collect_sizes_from_current_page(driver):
     return sizes
 
 
+def _parse_size_list(value):
+    if not value:
+        return []
+    value = value.strip()
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value)
+        if isinstance(parsed, list):
+            return [str(item).strip() for item in parsed if item]
+    except Exception:
+        pass
+    # 如果不是标准 JSON，尝试手动拆分
+    cleaned = value.strip("[]")
+    if not cleaned:
+        return []
+    parts = [p.strip().strip('"').strip("'") for p in cleaned.split(",")]
+    return [p for p in parts if p]
+
+
 def _extract_color_name(element, fallback):
     candidates = (
         element.get_attribute("data-display-value"),
@@ -161,14 +182,56 @@ def _collect_sizes_by_color(driver):
         if elements:
             break
 
-    results = []
+    attr_results = []
     seen_keys = set()
+
+    def _get_data_element(el):
+        if el.tag_name.lower() == "button":
+            return el
+        try:
+            return el.find_element(By.CSS_SELECTOR, "button")
+        except NoSuchElementException:
+            return el
+
+    for idx, element in enumerate(elements, start=1):
+        data_el = _get_data_element(element)
+        color_name = f"Color #{idx}"
+        try:
+            if _is_disabled(element) and _is_disabled(data_el):
+                continue
+            color_name = _extract_color_name(data_el, fallback=color_name)
+            color_key = (
+                data_el.get_attribute("data-attr-value")
+                or data_el.get_attribute("data-color")
+                or color_name
+            )
+            if color_key in seen_keys:
+                continue
+
+            instock_attr = (
+                data_el.get_attribute("data-size-stock")
+                or data_el.get_attribute("data-online-instock")
+            )
+            instock_sizes = _parse_size_list(instock_attr)
+            if instock_sizes:
+                attr_results.append({"color": color_name, "sizes": instock_sizes})
+                seen_keys.add(color_key)
+                print(f"[color sizes attr] {color_name} -> {instock_sizes}")
+        except Exception as exc:
+            print(f"[color sizes attr] error on {color_name}: {exc}")
+
+    if attr_results:
+        return attr_results
+
+    # 兜底：退回旧的点击方式
+    click_results = []
+    seen_keys.clear()
 
     if not elements:
         sizes = _collect_sizes_from_current_page(driver)
         if sizes:
-            results.append({"color": None, "sizes": sizes})
-        return results
+            click_results.append({"color": None, "sizes": sizes})
+        return click_results
 
     for idx, element in enumerate(elements, start=1):
         color_name = f"Color #{idx}"
@@ -188,13 +251,13 @@ def _collect_sizes_by_color(driver):
             time.sleep(0.5)
             sizes = _collect_sizes_from_current_page(driver)
             if sizes:
-                results.append({"color": color_name, "sizes": sizes})
-                print(f"[color sizes] {color_name} -> {sizes}")
+                click_results.append({"color": color_name, "sizes": sizes})
+                print(f"[color sizes click] {color_name} -> {sizes}")
             seen_keys.add(color_key)
         except Exception as exc:
-            print(f"[color sizes] error on {color_name}: {exc}")
+            print(f"[color sizes click] error on {color_name}: {exc}")
 
-    return results
+    return click_results
 
 
 def _parse_sizes_from_html(html):
@@ -418,7 +481,8 @@ def fetch_discounted_products():
             if discount_percent <= min_discount:
                 print(f"[skip page {page} #{idx}] discount {discount_percent}% < {min_discount}%")
                 continue
-
+            else 
+                break
             # 图片
             img_meta = (_first_or_none(
                 tile, By.CSS_SELECTOR, ".product-tile__image.default.active meta[itemprop='image']"
