@@ -26,6 +26,18 @@ SIZE_SELECTORS = (
     "[data-size]:not([disabled])",
 )
 
+COLOR_SELECTORS = (
+    "[data-attr='color'] button",
+    "[data-attr='color'] label",
+    "[data-attr='color'] a",
+    "fieldset[data-attr='color'] button",
+    "fieldset[data-attr='color'] label",
+    ".color-attribute button",
+    ".color-attribute label",
+    ".product-attribute__color button",
+    ".product-attribute__color label",
+)
+
 # 配置 Chrome 浏览器选项
 options = webdriver.ChromeOptions()
 
@@ -120,6 +132,71 @@ def _collect_sizes_from_current_page(driver):
     return sizes
 
 
+def _extract_color_name(element, fallback):
+    candidates = (
+        element.get_attribute("data-display-value"),
+        element.get_attribute("data-color-name"),
+        element.get_attribute("data-value"),
+        element.get_attribute("data-attr-value"),
+        element.get_attribute("aria-label"),
+        element.get_attribute("title"),
+        element.text,
+    )
+    for cand in candidates:
+        if not cand:
+            continue
+        cand = cand.strip()
+        if cand:
+            return cand
+    return fallback
+
+
+def _collect_sizes_by_color(driver):
+    elements = []
+    for selector in COLOR_SELECTORS:
+        try:
+            elements = driver.find_elements(By.CSS_SELECTOR, selector)
+        except Exception:
+            elements = []
+        if elements:
+            break
+
+    results = []
+    seen_keys = set()
+
+    if not elements:
+        sizes = _collect_sizes_from_current_page(driver)
+        if sizes:
+            results.append({"color": None, "sizes": sizes})
+        return results
+
+    for idx, element in enumerate(elements, start=1):
+        color_name = f"Color #{idx}"
+        try:
+            if _is_disabled(element):
+                continue
+            color_name = _extract_color_name(element, fallback=color_name)
+            color_key = element.get_attribute("data-attr-value") or color_name
+            if color_key in seen_keys:
+                continue
+
+            try:
+                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
+            except Exception:
+                pass
+            driver.execute_script("arguments[0].click();", element)
+            time.sleep(0.5)
+            sizes = _collect_sizes_from_current_page(driver)
+            if sizes:
+                results.append({"color": color_name, "sizes": sizes})
+                print(f"[color sizes] {color_name} -> {sizes}")
+            seen_keys.add(color_key)
+        except Exception as exc:
+            print(f"[color sizes] error on {color_name}: {exc}")
+
+    return results
+
+
 def _parse_sizes_from_html(html):
     seen = set()
     sizes = []
@@ -187,17 +264,17 @@ def _fetch_sizes_from_product_page(product_url, main_window):
         print(f"[sizes product] failed to open tab for {product_url}: {exc}")
         return []
 
-    sizes = []
+    color_sizes = []
     try:
         driver.switch_to.window(driver.window_handles[-1])
         try:
             WebDriverWait(driver, 15).until(
-                lambda d: bool(_collect_sizes_from_current_page(d))
+                EC.presence_of_element_located((By.CSS_SELECTOR, "[data-attr='color'], fieldset[data-attr='size']"))
             )
         except TimeoutException:
-            print(f"[sizes product] timeout collecting sizes for {product_url}")
-        sizes = _collect_sizes_from_current_page(driver)
-        print(f"[sizes product] collected {len(sizes)} sizes for {product_url}")
+            print(f"[sizes product] timeout waiting for options on {product_url}")
+        color_sizes = _collect_sizes_by_color(driver)
+        print(f"[sizes product] collected {len(color_sizes)} color groups for {product_url}")
     finally:
         try:
             driver.close()
@@ -208,7 +285,7 @@ def _fetch_sizes_from_product_page(product_url, main_window):
         except Exception:
             # 如果句柄顺序变化则退回第一个句柄
             driver.switch_to.window(driver.window_handles[0])
-    return sizes
+    return color_sizes
 
 
 def send_wechat_message(title, content):
@@ -373,26 +450,31 @@ def fetch_discounted_products():
             print(f"[collect error page {page} #{idx}] {e}")
 
     # ---------- 第 2 轮：为每个 item 在新标签页里采集尺码 ----------
-    # NOTE: 按照当前需求，尺码请求太多，所以先跳过这一步；
-    #       如需恢复，只需去掉注释并重新启用下面的逻辑。
-    #
-    # main_window = driver.current_window_handle
-    # for it in items:
-    #     sizes = []
-    #     qa_url = it.get("qa_url")
-    #     product_link = it.get("product_link")
-    #
-    #     # 先尝试直接在商品详情页抓取尺码
-    #     sizes = _fetch_sizes_from_product_page(product_link, main_window)
-    #
-    #     # 兜底：如果详情页取不到，再尝试 quick add 片段
-    #     if not sizes and qa_url:
-    #         sizes = _fetch_sizes_from_quick_add(qa_url)
-    #         print(f"[sizes quickadd] collected {len(sizes)} sizes for {qa_url}")
-    #
-    #     it["sizes"] = sizes
+    main_window = driver.current_window_handle
     for it in items:
-        it["sizes"] = []
+        qa_url = it.get("qa_url")
+        product_link = it.get("product_link")
+        sizes = []
+
+        color_size_groups = _fetch_sizes_from_product_page(product_link, main_window)
+
+        if not color_size_groups and qa_url:
+            quick_sizes = _fetch_sizes_from_quick_add(qa_url)
+            if quick_sizes:
+                color_size_groups = [{"color": None, "sizes": quick_sizes}]
+                print(f"[sizes quickadd] collected {len(quick_sizes)} sizes for {qa_url}")
+
+        for group in color_size_groups:
+            color_label = group.get("color") or ""
+            size_text = " ".join(group.get("sizes", []))
+            if not size_text:
+                continue
+            if color_label:
+                sizes.append(f"{color_label}: {size_text}")
+            else:
+                sizes.append(size_text)
+
+        it["sizes"] = sizes
 
     # ---------- 生成 HTML ----------
     utc_now = datetime.utcnow()
