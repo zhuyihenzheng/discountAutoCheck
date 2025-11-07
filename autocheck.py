@@ -481,8 +481,6 @@ def fetch_discounted_products():
             if discount_percent <= min_discount:
                 print(f"[skip page {page} #{idx}] discount {discount_percent}% < {min_discount}%")
                 continue
-            else:
-                break
             # 图片
             img_meta = (_first_or_none(
                 tile, By.CSS_SELECTOR, ".product-tile__image.default.active meta[itemprop='image']"
@@ -510,6 +508,8 @@ def fetch_discounted_products():
             })
             if pid:
                 seen_pids.add(pid)
+
+            break
         except Exception as e:
             print(f"[collect error page {page} #{idx}] {e}")
 
