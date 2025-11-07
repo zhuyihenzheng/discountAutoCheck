@@ -481,7 +481,7 @@ def fetch_discounted_products():
             if discount_percent <= min_discount:
                 print(f"[skip page {page} #{idx}] discount {discount_percent}% < {min_discount}%")
                 continue
-            else 
+            else:
                 break
             # 图片
             img_meta = (_first_or_none(
