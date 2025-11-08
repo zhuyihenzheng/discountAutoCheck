@@ -508,8 +508,7 @@ def fetch_discounted_products():
             })
             if pid:
                 seen_pids.add(pid)
-
-            break
+                
         except Exception as e:
             print(f"[collect error page {page} #{idx}] {e}")
 
