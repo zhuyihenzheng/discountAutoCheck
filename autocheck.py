@@ -202,7 +202,7 @@ def _collect_sizes_by_color(driver):
             color_name = _extract_color_name(data_el, fallback=color_name)
             color_key = (
                 data_el.get_attribute("data-attr-value")
-                or data_el.get_attribute("data-color")
+                or data_el.get_attribute("data-caption")
                 or color_name
             )
             if color_key in seen_keys:
