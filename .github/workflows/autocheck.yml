@@ -3,7 +3,9 @@ name: Upload Discounted Products to Gist
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 * * * *"
+    # UTC: 01:05 / 07:05 / 13:05 / 19:05
+    # JST: 10:05 / 16:05 / 22:05 / 04:05
+    - cron: "5 1,7,13,19 * * *"
 
 jobs:
   upload:
