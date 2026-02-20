@@ -3,7 +3,7 @@ name: Upload Discounted Products to Gist
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 21 * * *" 
+    - cron: "0 * * * *"
 
 jobs:
   upload:
@@ -39,5 +39,6 @@ jobs:
     - name: Run Python script to generate HTML and upload to Gist
       env:
         GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
-        WECHAT_SENDKEY: ${{ secrets.WECHAT_SENDKEY }}
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       run: python autocheck.py

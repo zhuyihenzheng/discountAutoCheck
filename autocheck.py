@@ -39,6 +39,12 @@ COLOR_SELECTORS = (
     ".product-attribute__color label",
 )
 
+PRODUCT_GIST_DESCRIPTION = "Patagonia Discounted Products"
+PRODUCT_GIST_FILE = "discounted_products.html"
+STATE_GIST_DESCRIPTION = "Patagonia Discount State"
+STATE_GIST_FILE = "discount_state.json"
+MAX_TELEGRAM_ITEMS = 8
+
 # 配置 Chrome 浏览器选项
 options = webdriver.ChromeOptions()
 
@@ -351,6 +357,196 @@ def _fetch_sizes_from_product_page(product_url, main_window):
     return color_sizes
 
 
+def _build_github_headers():
+    gist_token = os.getenv("GIST_TOKEN")
+    if not gist_token:
+        raise RuntimeError("GIST_TOKEN is not configured")
+    return {
+        "Authorization": f"token {gist_token}",
+        "Accept": "application/vnd.github+json",
+    }
+
+
+def _find_gist_by_description(description, headers):
+    try:
+        response = requests.get("https://api.github.com/gists", headers=headers, timeout=30)
+        if response.status_code != 200:
+            print(f"[gist] failed to list gists: {response.status_code} {response.text}")
+            return None
+        for gist in response.json():
+            if gist.get("description") == description:
+                return gist
+    except Exception as exc:
+        print(f"[gist] list error: {exc}")
+    return None
+
+
+def _upsert_gist(description, files, public=True):
+    try:
+        headers = _build_github_headers()
+    except RuntimeError as exc:
+        print(f"[gist] {exc}")
+        return None
+    gist = _find_gist_by_description(description, headers)
+    payload = {"description": description, "files": files}
+    try:
+        if gist:
+            gist_id = gist["id"]
+            response = requests.patch(
+                f"https://api.github.com/gists/{gist_id}",
+                headers=headers,
+                json=payload,
+                timeout=30,
+            )
+        else:
+            payload["public"] = public
+            response = requests.post(
+                "https://api.github.com/gists",
+                headers=headers,
+                json=payload,
+                timeout=30,
+            )
+    except Exception as exc:
+        print(f"[gist] upsert error ({description}): {exc}")
+        return None
+
+    if response.status_code not in (200, 201):
+        print(f"[gist] upsert failed ({description}): {response.status_code} {response.text}")
+        return None
+    return response.json()
+
+
+def load_previous_state():
+    try:
+        headers = _build_github_headers()
+    except RuntimeError as exc:
+        print(f"[state] {exc}")
+        return {}
+
+    gist = _find_gist_by_description(STATE_GIST_DESCRIPTION, headers)
+    if not gist:
+        return {}
+
+    state_file = gist.get("files", {}).get(STATE_GIST_FILE)
+    if not state_file:
+        return {}
+
+    content = state_file.get("content")
+    if content:
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError:
+            print("[state] failed to decode state JSON from gist content")
+
+    raw_url = state_file.get("raw_url")
+    if not raw_url:
+        return {}
+
+    try:
+        response = requests.get(raw_url, timeout=20)
+        if response.status_code != 200:
+            print(f"[state] failed to fetch raw state: {response.status_code}")
+            return {}
+        return json.loads(response.text)
+    except Exception as exc:
+        print(f"[state] failed to load previous state: {exc}")
+    return {}
+
+
+def save_current_state(state):
+    content = json.dumps(state, ensure_ascii=False, sort_keys=True)
+    gist_data = _upsert_gist(
+        description=STATE_GIST_DESCRIPTION,
+        files={STATE_GIST_FILE: {"content": content}},
+        public=False,
+    )
+    if gist_data:
+        print("[state] state saved")
+        return True
+    return False
+
+
+def _build_state_snapshot(items):
+    snapshot = []
+    for item in items:
+        snapshot.append(
+            {
+                "pid": str(item.get("pid") or ""),
+                "name": item.get("name") or "",
+                "original_price": item.get("original_price"),
+                "sale_price": item.get("sale_price"),
+                "discount_percent": item.get("discount_percent"),
+                "sizes": sorted(item.get("sizes") or []),
+                "product_link": item.get("product_link") or "",
+            }
+        )
+    snapshot.sort(key=lambda x: (x["pid"], x["name"], x["product_link"]))
+    return snapshot
+
+
+def send_telegram_message(content):
+    bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID")
+    if not bot_token or not chat_id:
+        print("[telegram] TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is not configured")
+        return False
+
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": content,
+        "disable_web_page_preview": True,
+    }
+    try:
+        response = requests.post(url, json=payload, timeout=20)
+    except Exception as exc:
+        print(f"[telegram] send failed: {exc}")
+        return False
+
+    if response.status_code != 200:
+        print(f"[telegram] send failed: {response.status_code} {response.text}")
+        return False
+
+    body = response.json()
+    if not body.get("ok"):
+        print(f"[telegram] send failed: {body}")
+        return False
+
+    print("[telegram] message sent")
+    return True
+
+
+def _format_telegram_update(items, gist_url):
+    utc_now = datetime.utcnow()
+    jst = pytz.timezone("Asia/Tokyo")
+    execution_time = utc_now.astimezone(jst).strftime("%Y-%m-%d %H:%M:%S JST")
+
+    lines = [
+        "Patagonia 折扣监控有更新",
+        f"更新时间: {execution_time}",
+        f"商品数量: {len(items)}",
+    ]
+    for item in items[:MAX_TELEGRAM_ITEMS]:
+        name = (item.get("name") or "").strip() or "(Unnamed)"
+        discount = item.get("discount_percent")
+        sale_price = item.get("sale_price")
+        line = f"- {name} | {discount}%"
+        if sale_price is not None:
+            line += f" | ¥{sale_price:,}"
+        lines.append(line)
+
+    if len(items) > MAX_TELEGRAM_ITEMS:
+        lines.append(f"... 还有 {len(items) - MAX_TELEGRAM_ITEMS} 个商品")
+
+    if gist_url:
+        lines.append(f"详情: {gist_url}")
+
+    message = "\n".join(lines)
+    if len(message) > 3900:
+        message = message[:3890] + "\n...(truncated)"
+    return message
+
+
 def send_wechat_message(title, content):
     # 替换为你的 Server酱 SendKey
     send_key = os.getenv("WECHAT_SENDKEY")
@@ -585,52 +781,51 @@ def fetch_discounted_products():
     </body>
     </html>
     """
-    return html_content
+    return items, html_content
 
 def upload_to_gist(content):
-    GIST_TOKEN = os.getenv("GIST_TOKEN")
-    headers = {"Authorization": f"token {GIST_TOKEN}"}
+    gist_data = _upsert_gist(
+        description=PRODUCT_GIST_DESCRIPTION,
+        files={PRODUCT_GIST_FILE: {"content": content}},
+        public=True,
+    )
+    if gist_data:
+        print("[gist] product gist upserted")
+        return gist_data.get("html_url")
+    return None
 
-    # 检查是否已有 Gist
-    gist_id = None
-    response = requests.get("https://api.github.com/gists", headers=headers)
-    if response.status_code == 200:
-        gists = response.json()
-        for gist in gists:
-            if gist["description"] == "Patagonia Discounted Products":
-                gist_id = gist["id"]
-                break
 
-    # 创建或更新 Gist
-    if gist_id:
-        url = f"https://api.github.com/gists/{gist_id}"
-        payload = {
-            "description": "Patagonia Discounted Products",
-            "files": {
-                "discounted_products.html": {
-                    "content": content
+def main():
+    previous_state = load_previous_state()
+    previous_snapshot = previous_state.get("snapshot") or []
+
+    items, html_content = fetch_discounted_products()
+    gist_url = upload_to_gist(html_content)
+
+    current_snapshot = _build_state_snapshot(items)
+    changed = current_snapshot != previous_snapshot
+    print(f"[state] changed={changed}")
+
+    if changed:
+        message = _format_telegram_update(items, gist_url)
+        message_sent = send_telegram_message(message)
+        if message_sent:
+            save_current_state(
+                {
+                    "snapshot": current_snapshot,
+                    "updated_at": datetime.utcnow().isoformat() + "Z",
+                    "count": len(items),
                 }
-            }
-        }
-        requests.patch(url, headers=headers, json=payload)
-        print("Gist updated.")
+            )
     else:
-        url = "https://api.github.com/gists"
-        payload = {
-            "description": "Patagonia Discounted Products",
-            "public": True,
-            "files": {
-                "discounted_products.html": {
-                    "content": content
-                }
-            }
-        }
-        requests.post(url, headers=headers, json=payload)
-        print("New Gist created: ")
-        # 测试推送
-        
+        print("[state] no changes, telegram not sent")
 
-# 获取商品数据并上传到 Gist
-html_content = fetch_discounted_products()
-upload_to_gist(html_content)
-#send_wechat_message("提醒", "快去看！！！")
+
+if __name__ == "__main__":
+    try:
+        main()
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
