@@ -484,6 +484,58 @@ def _build_state_snapshot(items):
     return snapshot
 
 
+def _item_key(item):
+    pid = (item.get("pid") or "").strip()
+    product_link = (item.get("product_link") or "").strip()
+    name = (item.get("name") or "").strip()
+    if pid:
+        return f"pid:{pid}"
+    if product_link:
+        return f"url:{product_link}"
+    return f"name:{name}"
+
+
+def _build_snapshot_index(snapshot):
+    index = {}
+    for item in snapshot:
+        index[_item_key(item)] = item
+    return index
+
+
+def _compute_additions(previous_snapshot, current_snapshot):
+    previous_index = _build_snapshot_index(previous_snapshot)
+    current_index = _build_snapshot_index(current_snapshot)
+
+    new_products = []
+    added_sizes = []
+
+    for key, current_item in current_index.items():
+        previous_item = previous_index.get(key)
+        if not previous_item:
+            new_products.append(current_item)
+            continue
+
+        previous_size_set = set(previous_item.get("sizes") or [])
+        current_size_set = set(current_item.get("sizes") or [])
+        newly_added = sorted(current_size_set - previous_size_set)
+        if newly_added:
+            added_sizes.append(
+                {
+                    "item": current_item,
+                    "sizes": newly_added,
+                }
+            )
+
+    return {
+        "new_products": new_products,
+        "added_sizes": added_sizes,
+    }
+
+
+def _has_additions(diff):
+    return bool(diff.get("new_products") or diff.get("added_sizes"))
+
+
 def send_telegram_message(content):
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
@@ -516,27 +568,45 @@ def send_telegram_message(content):
     return True
 
 
-def _format_telegram_update(items, gist_url):
+def _format_telegram_update(diff, total_count, gist_url):
     utc_now = datetime.utcnow()
     jst = pytz.timezone("Asia/Tokyo")
     execution_time = utc_now.astimezone(jst).strftime("%Y-%m-%d %H:%M:%S JST")
 
-    lines = [
-        "Patagonia 折扣监控有更新",
-        f"更新时间: {execution_time}",
-        f"商品数量: {len(items)}",
-    ]
-    for item in items[:MAX_TELEGRAM_ITEMS]:
-        name = (item.get("name") or "").strip() or "(Unnamed)"
-        discount = item.get("discount_percent")
-        sale_price = item.get("sale_price")
-        line = f"- {name} | {discount}%"
-        if sale_price is not None:
-            line += f" | ¥{sale_price:,}"
-        lines.append(line)
+    new_products = diff.get("new_products") or []
+    added_sizes = diff.get("added_sizes") or []
 
-    if len(items) > MAX_TELEGRAM_ITEMS:
-        lines.append(f"... 还有 {len(items) - MAX_TELEGRAM_ITEMS} 个商品")
+    lines = [
+        "Patagonia 折扣监控有追加",
+        f"更新时间: {execution_time}",
+        f"当前商品数量: {total_count}",
+        f"差分: 新增商品 {len(new_products)} 个, 新增尺码 {len(added_sizes)} 个",
+    ]
+
+    if new_products:
+        lines.append("")
+        lines.append("新增商品:")
+        for item in new_products[:MAX_TELEGRAM_ITEMS]:
+            name = (item.get("name") or "").strip() or "(Unnamed)"
+            discount = item.get("discount_percent")
+            sale_price = item.get("sale_price")
+            line = f"- {name} | {discount}%"
+            if sale_price is not None:
+                line += f" | ¥{sale_price:,}"
+            lines.append(line)
+        if len(new_products) > MAX_TELEGRAM_ITEMS:
+            lines.append(f"... 新增商品还有 {len(new_products) - MAX_TELEGRAM_ITEMS} 个")
+
+    if added_sizes:
+        lines.append("")
+        lines.append("新增尺码:")
+        for entry in added_sizes[:MAX_TELEGRAM_ITEMS]:
+            item = entry["item"]
+            sizes = entry["sizes"]
+            name = (item.get("name") or "").strip() or "(Unnamed)"
+            lines.append(f"- {name} | +{' / '.join(sizes)}")
+        if len(added_sizes) > MAX_TELEGRAM_ITEMS:
+            lines.append(f"... 新增尺码还有 {len(added_sizes) - MAX_TELEGRAM_ITEMS} 个")
 
     if gist_url:
         lines.append(f"详情: {gist_url}")
@@ -803,11 +873,12 @@ def main():
     gist_url = upload_to_gist(html_content)
 
     current_snapshot = _build_state_snapshot(items)
-    changed = current_snapshot != previous_snapshot
-    print(f"[state] changed={changed}")
+    diff = _compute_additions(previous_snapshot, current_snapshot)
+    has_additions = _has_additions(diff)
+    print(f"[state] has_additions={has_additions}")
 
-    if changed:
-        message = _format_telegram_update(items, gist_url)
+    if has_additions:
+        message = _format_telegram_update(diff, len(items), gist_url)
         message_sent = send_telegram_message(message)
         if message_sent:
             save_current_state(
@@ -818,7 +889,14 @@ def main():
                 }
             )
     else:
-        print("[state] no changes, telegram not sent")
+        print("[state] no additions, telegram not sent")
+        save_current_state(
+            {
+                "snapshot": current_snapshot,
+                "updated_at": datetime.utcnow().isoformat() + "Z",
+                "count": len(items),
+            }
+        )
 
 
 if __name__ == "__main__":
