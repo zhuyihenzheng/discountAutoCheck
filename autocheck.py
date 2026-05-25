@@ -256,6 +256,67 @@ def _extract_color_prices(element, data_el):
     return sale, listp
 
 
+def _find_color_elements(driver):
+    for selector in COLOR_SELECTORS:
+        try:
+            elements = driver.find_elements(By.CSS_SELECTOR, selector)
+        except Exception:
+            elements = []
+        if elements:
+            return elements
+    return []
+
+
+def _get_color_data_element(element):
+    if element.tag_name.lower() == "button":
+        return element
+    try:
+        return element.find_element(By.CSS_SELECTOR, "button")
+    except NoSuchElementException:
+        return element
+
+
+def _is_selected_color_option(element, data_el):
+    for candidate in (data_el, element):
+        try:
+            cls = (candidate.get_attribute("class") or "").lower()
+            aria_pressed = (candidate.get_attribute("aria-pressed") or "").lower()
+            aria_checked = (candidate.get_attribute("aria-checked") or "").lower()
+            aria_current = (candidate.get_attribute("aria-current") or "").lower()
+            data_selected = (candidate.get_attribute("data-selected") or "").lower()
+            checked = candidate.get_attribute("checked")
+            if any(flag in cls for flag in ("selected", "active", "current", "checked")):
+                return True
+            if aria_pressed in ("true", "1"):
+                return True
+            if aria_checked in ("true", "1"):
+                return True
+            if aria_current in ("true", "page", "step", "location"):
+                return True
+            if data_selected in ("true", "1"):
+                return True
+            if checked is not None:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _wait_for_color_selection(driver, color_name, timeout=3.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        for element in _find_color_elements(driver):
+            try:
+                data_el = _get_color_data_element(element)
+                current_name = _extract_color_name(data_el, fallback="")
+                if _colors_match(current_name, color_name) and _is_selected_color_option(element, data_el):
+                    return True
+            except Exception:
+                continue
+        time.sleep(0.1)
+    return False
+
+
 def _extract_price_pair_from_text(text):
     if not text:
         return None, None
@@ -308,6 +369,8 @@ def _enrich_color_prices_by_click(driver, color_entries):
         color_name = result.get("color")
         try:
             _click_color_element(driver, entry["element"])
+            if not _wait_for_color_selection(driver, color_name):
+                print(f"[color price click] selection did not confirm for {color_name}")
             sale_price, list_price = _extract_current_page_prices(driver)
             result["sale_price"] = sale_price
             result["list_price"] = list_price
@@ -320,29 +383,14 @@ def _enrich_color_prices_by_click(driver, color_entries):
 
 
 def _collect_sizes_by_color(driver):
-    elements = []
-    for selector in COLOR_SELECTORS:
-        try:
-            elements = driver.find_elements(By.CSS_SELECTOR, selector)
-        except Exception:
-            elements = []
-        if elements:
-            break
+    elements = _find_color_elements(driver)
 
     attr_results = []
     attr_entries = []
     seen_keys = set()
 
-    def _get_data_element(el):
-        if el.tag_name.lower() == "button":
-            return el
-        try:
-            return el.find_element(By.CSS_SELECTOR, "button")
-        except NoSuchElementException:
-            return el
-
     for idx, element in enumerate(elements, start=1):
-        data_el = _get_data_element(element)
+        data_el = _get_color_data_element(element)
         color_name = f"Color #{idx}"
         try:
             if _is_disabled(element) and _is_disabled(data_el):
@@ -405,6 +453,8 @@ def _collect_sizes_by_color(driver):
                 continue
 
             _click_color_element(driver, element)
+            if not _wait_for_color_selection(driver, color_name):
+                print(f"[color sizes click] selection did not confirm for {color_name}")
             sizes = _collect_sizes_from_current_page(driver)
             if sizes:
                 sale_price, list_price = _extract_current_page_prices(driver)
@@ -898,7 +948,7 @@ def _filter_groups_by_discount(
 
 
 def fetch_discounted_products():
-    min_discount = 30
+    min_discount = 0
     min_color_discount = 50
     max_pages = None  # None 表示自动遍历直至没有更多商品
     wait_timeout = 30
