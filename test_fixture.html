@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="ja"><body>
+<div class="product-grid">
+
+  <!-- Old-style tile (pre-redesign theme classes) -->
+  <div class="product" data-pid="11111">
+    <div class="pdp-link">
+      <a class="link" itemprop="url" href="/product/mens-jacket/11111.html">
+        <span class="product-tile__name">Men's Old Jacket</span>
+      </a>
+    </div>
+    <product-tile-pricing sale-price="8250" list-price="16500"></product-tile-pricing>
+    <div class="product-tile__image default active">
+      <meta itemprop="image" content="https://img.patagonia.jp/old.jpg">
+    </div>
+    <div class="product-tile__quickadd-container">
+      <button class="tile-quickadd-btn" data-url="/on/demandware.store/Sites/Patagonia-Show?pid=11111"></button>
+    </div>
+  </div>
+
+  <!-- Redesigned tile: renamed theme classes, data-* prices, srcset image -->
+  <article class="c-card" data-pid="22222">
+    <a class="c-card__media" href="/product/womens-fleece/22222.html"
+       aria-label="Women's New Fleece" data-list-price="22000" data-sale-price="9900">
+      <img srcset="https://img.patagonia.jp/new-300.jpg 300w, https://img.patagonia.jp/new-600.jpg 600w" alt="Women's New Fleece">
+    </a>
+    <button class="c-card__quickadd" data-url="/on/demandware.store/Sites/Patagonia-ShowQuickView?pid=22222">Quick add</button>
+  </article>
+
+  <!-- Redesigned tile: price only in yen text, no data attrs, link without itemprop -->
+  <article class="c-card" data-pid="33333">
+    <a class="c-card__link" href="/product/kids-hat/33333.html"><h3 class="c-card__title">Kids Hat</h3></a>
+    <div class="c-card__price"><span class="is-sale">¥3,300</span> <span class="was">¥5,500</span></div>
+  </article>
+
+  <!-- Full-price item: should be skipped (no discount) -->
+  <article class="c-card" data-pid="44444">
+    <a href="/product/full-price/44444.html"><h3>Full Price Pants</h3></a>
+    <div class="c-card__price"><span>¥12,000</span></div>
+  </article>
+
+</div>
+</body></html>
