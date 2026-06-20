@@ -1174,6 +1174,24 @@ def _tile_qa_url(tile):
     return None
 
 
+def collect_tile_pids(html):
+    """Return all product-tile ``data-pid`` values present in a listing page.
+
+    Used to drive pagination: we advance/stop based on the raw set of product
+    tiles, independent of whether any of them happen to be discounted, so a page
+    full of full-price items does not look like "the end of the results".
+    """
+    root = _build_dom(html)
+    pids = []
+    seen = set()
+    for tile in root.iter():
+        pid = tile.attr("data-pid")
+        if pid and pid not in seen:
+            seen.add(pid)
+            pids.append(pid)
+    return pids
+
+
 def parse_listing_html(html, min_discount=0):
     """Extract discounted product tiles from a rendered listing page's HTML.
 
@@ -1214,22 +1232,28 @@ def parse_listing_html(html, min_discount=0):
 def fetch_discounted_products():
     min_discount = 0
     min_color_discount = 50
-    max_pages = None  # None 表示自动遍历直至没有更多商品
+    page_size = 48  # Salesforce Commerce Cloud grid size (sz parameter)
+    max_pages = 100  # 安全上限，避免站点忽略分页参数时陷入死循环
     wait_timeout = 30
     delay_between_pages = 1.5
 
     # ---------- 第 1 轮：渲染每页并用 parse_listing_html 解析列表 ----------
+    # patagonia.jp 基于 Salesforce Commerce Cloud（Demandware），列表分页使用
+    # start（偏移量）+ sz（每页数量），而不是 ?page=N。用 ?page=N 会被忽略，
+    # 导致每一页都返回第一页内容，于是只抓到一页。这里改为 start/sz 遍历。
     drv = _get_driver()
     items = []
-    seen_pids = set()
+    seen_pids = set()        # 已收录的折扣商品 pid
+    seen_raw_pids = set()    # 已见过的全部商品 pid（含原价），用于判断是否到末页
     # 改版に強い待機条件：テーマ依存のクラスではなく data-pid の出現を待つ。
     wait_selector = "[data-pid]"
     page = 1
+    start = 0
     while True:
-        if max_pages and page > max_pages:
+        if page > max_pages:
             print(f"[paging] reached max_pages={max_pages}, stop")
             break
-        url = f"{BASE}/shop/web-specials?page={page}"
+        url = f"{BASE}/shop/web-specials?start={start}&sz={page_size}"
         print(f"[page {page}] fetching {url}")
         try:
             drv.get(url)
@@ -1244,18 +1268,31 @@ def fetch_discounted_products():
             print(f"[page {page}] wait timeout (no [data-pid]), stop paging")
             break
 
-        page_items = parse_listing_html(drv.page_source, min_discount=min_discount)
-        print(f"[page {page}] parsed {len(page_items)} discounted tiles")
-
-        new_items = [it for it in page_items if it["pid"] not in seen_pids]
-        if not new_items:
-            print(f"[paging] no new products on page {page}, stop")
+        page_source = drv.page_source
+        raw_pids = collect_tile_pids(page_source)
+        if not raw_pids:
+            print(f"[paging] no product tiles on page {page}, stop")
             break
+
+        new_raw_pids = [pid for pid in raw_pids if pid not in seen_raw_pids]
+        if not new_raw_pids:
+            # 没有任何新商品出现：站点要么到达末页，要么忽略了分页参数。
+            print(f"[paging] no new product tiles on page {page}, stop")
+            break
+        seen_raw_pids.update(raw_pids)
+
+        page_items = parse_listing_html(page_source, min_discount=min_discount)
+        new_items = [it for it in page_items if it["pid"] not in seen_pids]
+        print(
+            f"[page {page}] {len(raw_pids)} tiles ({len(new_raw_pids)} new),"
+            f" {len(page_items)} discounted, {len(new_items)} new discounted"
+        )
         for it in new_items:
             seen_pids.add(it["pid"])
             items.append(it)
 
         page += 1
+        start += page_size
         time.sleep(delay_between_pages)
 
     print(f"[round1] collected {len(items)} discounted products across {page} page(s)")
