@@ -1,17 +1,28 @@
+import argparse
 import json
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from html.parser import HTMLParser
 from urllib.parse import urljoin
 
 import os
-import pytz
 import requests
-from selenium import webdriver
-from selenium.common.exceptions import NoSuchElementException, TimeoutException
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import WebDriverWait
+
+# Selenium / pytz are imported lazily so that offline HTML parsing (used to
+# verify the scraper against a saved page without a browser or network) works
+# in environments where those packages / a Chrome binary are unavailable.
+# These names are populated by _ensure_selenium() before the online flow runs.
+webdriver = None
+By = None
+EC = None
+WebDriverWait = None
+NoSuchElementException = Exception
+TimeoutException = Exception
+driver = None
+
+# Asia/Tokyo is a fixed +9 offset with no DST, so we avoid the pytz dependency.
+JST = timezone(timedelta(hours=9))
 
 BASE = "https://www.patagonia.jp"
 DEFAULT_USER_AGENT = (
@@ -47,21 +58,43 @@ MAX_TELEGRAM_ITEMS = 8
 TEST_STOP_AFTER_FILTERED_PRODUCTS = 0  # 0 means full run.
 TEST_REQUIRE_COLOR_PRICE_DATA = False  # True means test stops only after actual per-color price filtering.
 
-# 配置 Chrome 浏览器选项
-options = webdriver.ChromeOptions()
+def _ensure_selenium():
+    """Import selenium on demand and expose the symbols used by the online flow."""
+    global webdriver, By, EC, WebDriverWait, NoSuchElementException, TimeoutException
+    from selenium import webdriver as _webdriver
+    from selenium.common.exceptions import (
+        NoSuchElementException as _NoSuchElementException,
+        TimeoutException as _TimeoutException,
+    )
+    from selenium.webdriver.common.by import By as _By
+    from selenium.webdriver.support import expected_conditions as _EC
+    from selenium.webdriver.support.ui import WebDriverWait as _WebDriverWait
 
-options.add_argument("--headless")  # 无头模式，后台运行
-options.add_argument("--no-sandbox")
-options.add_argument("--disable-dev-shm-usage")
-options.add_argument("start-maximized")          # 最大化窗口
-options.add_argument("disable-infobars")
-options.add_argument("--disable-extensions")
-options.add_argument("--headless=new")
-options.add_argument(f"user-agent={DEFAULT_USER_AGENT}")
-#driver_path = "/usr/local/bin/chromedriver-linux64/chromedriver"
-#service = Service(driver_path)
-#driver = webdriver.Chrome(service=service, options=options)
-driver = webdriver.Chrome(options=options)
+    webdriver = _webdriver
+    By = _By
+    EC = _EC
+    WebDriverWait = _WebDriverWait
+    NoSuchElementException = _NoSuchElementException
+    TimeoutException = _TimeoutException
+
+
+def _get_driver():
+    """Create (once) and return the headless Chrome driver."""
+    global driver
+    if driver is not None:
+        return driver
+    _ensure_selenium()
+    options = webdriver.ChromeOptions()
+    options.add_argument("--headless=new")  # 无头模式，后台运行
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("start-maximized")          # 最大化窗口
+    options.add_argument("disable-infobars")
+    options.add_argument("--disable-extensions")
+    options.add_argument(f"user-agent={DEFAULT_USER_AGENT}")
+    driver = webdriver.Chrome(options=options)
+    return driver
+
 
 def _num(s):
     if s is None:
@@ -794,9 +827,8 @@ def send_telegram_message(content):
 
 
 def _format_telegram_update(diff, total_count, gist_url):
-    utc_now = datetime.utcnow()
-    jst = pytz.timezone("Asia/Tokyo")
-    execution_time = utc_now.astimezone(jst).strftime("%Y-%m-%d %H:%M:%S JST")
+    utc_now = datetime.now(timezone.utc)
+    execution_time = utc_now.astimezone(JST).strftime("%Y-%m-%d %H:%M:%S JST")
 
     new_products = diff.get("new_products") or []
     added_sizes = diff.get("added_sizes") or []
@@ -947,6 +979,238 @@ def _filter_groups_by_discount(
     return filtered
 
 
+# ---------------------------------------------------------------------------
+# Layout-resilient listing parser
+#
+# A site redesign ("改版") usually renames the theme-level CSS classes while the
+# application-level signals survive: product tiles still carry data-pid, prices
+# still live in a <product-tile-pricing> custom element (or data-*-price
+# attributes), and the name/link are plain anchors. So instead of matching exact
+# class chains, we parse the rendered HTML into a small DOM and extract by these
+# stable signals, with a yen-text fallback for the price. This also lets us
+# verify parsing offline against a saved page (see run_offline / --html).
+# ---------------------------------------------------------------------------
+
+_VOID_TAGS = {
+    "area", "base", "br", "col", "embed", "hr", "img", "input",
+    "link", "meta", "param", "source", "track", "wbr",
+}
+
+NAME_CLASS_HINTS = (
+    "product-tile__name",
+    "product-name",
+    "tile__name",
+    "product-tile-name",
+    "producttile__name",
+    "pdp-link",
+)
+
+
+class _Node:
+    __slots__ = ("tag", "attrs", "children", "parent", "text_parts")
+
+    def __init__(self, tag, attrs):
+        self.tag = tag
+        self.attrs = attrs
+        self.children = []
+        self.parent = None
+        self.text_parts = []
+
+    def attr(self, name):
+        return self.attrs.get(name)
+
+    @property
+    def classes(self):
+        return (self.attrs.get("class") or "").lower()
+
+    def iter(self):
+        yield self
+        for child in self.children:
+            yield from child.iter()
+
+    def text(self):
+        parts = []
+
+        def _rec(node):
+            for chunk in node.text_parts:
+                if chunk and chunk.strip():
+                    parts.append(chunk.strip())
+            for child in node.children:
+                _rec(child)
+
+        _rec(self)
+        return " ".join(parts)
+
+
+class _TreeBuilder(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.root = _Node("#root", {})
+        self.stack = [self.root]
+
+    def _append(self, tag, attrs):
+        node = _Node(tag, {k: (v or "") for k, v in attrs})
+        node.parent = self.stack[-1]
+        self.stack[-1].children.append(node)
+        return node
+
+    def handle_starttag(self, tag, attrs):
+        node = self._append(tag, attrs)
+        if tag not in _VOID_TAGS:
+            self.stack.append(node)
+
+    def handle_startendtag(self, tag, attrs):
+        self._append(tag, attrs)
+
+    def handle_endtag(self, tag):
+        for i in range(len(self.stack) - 1, 0, -1):
+            if self.stack[i].tag == tag:
+                del self.stack[i:]
+                return
+
+    def handle_data(self, data):
+        if data and data.strip():
+            self.stack[-1].text_parts.append(data)
+
+
+def _build_dom(html):
+    builder = _TreeBuilder()
+    try:
+        builder.feed(html or "")
+    except Exception as exc:
+        print(f"[parse] DOM build error: {exc}")
+    return builder.root
+
+
+def _tile_image(tile):
+    for node in tile.iter():
+        if node.tag == "meta" and node.attr("itemprop") == "image" and node.attr("content"):
+            return node.attr("content")
+    for node in tile.iter():
+        if node.tag != "img":
+            continue
+        for attr in ("src", "data-src", "data-original"):
+            value = node.attr(attr)
+            if value:
+                return value
+        srcset = node.attr("srcset")
+        if srcset:
+            return srcset.split(",")[0].strip().split(" ")[0]
+    return None
+
+
+def _tile_link(tile):
+    best = None
+    for node in tile.iter():
+        if node.tag != "a":
+            continue
+        href = node.attr("href")
+        if not href:
+            continue
+        if node.attr("itemprop") == "url":
+            return href
+        if best is None and ("/product" in href or ".html" in href or "/shop/" in href):
+            best = href
+        if best is None:
+            best = href
+    return best
+
+
+def _tile_name(tile):
+    for node in tile.iter():
+        if node.attr("itemprop") == "name":
+            text = node.text()
+            if text:
+                return text
+    for node in tile.iter():
+        cls = node.classes
+        if any(hint in cls for hint in NAME_CLASS_HINTS):
+            text = node.text()
+            if text:
+                return text
+    for node in tile.iter():
+        if node.tag == "a":
+            for attr in ("aria-label", "title"):
+                value = node.attr(attr)
+                if value and value.strip():
+                    return value.strip()
+            text = node.text()
+            if text:
+                return text
+    for node in tile.iter():
+        if node.tag == "img" and node.attr("alt"):
+            return node.attr("alt").strip()
+    return ""
+
+
+def _tile_prices(tile):
+    for node in tile.iter():
+        sale = None
+        listp = None
+        for attr in COLOR_SALE_PRICE_ATTRS:
+            value = _num(node.attr(attr))
+            if value:
+                sale = value
+                break
+        for attr in COLOR_LIST_PRICE_ATTRS:
+            value = _num(node.attr(attr))
+            if value:
+                listp = value
+                break
+        if sale and listp and listp > 0:
+            return sale, listp
+    return _extract_price_pair_from_text(tile.text())
+
+
+def _tile_qa_url(tile):
+    for node in tile.iter():
+        data_url = node.attr("data-url")
+        if not data_url:
+            continue
+        cls = node.classes
+        low = data_url.lower()
+        if "quickadd" in cls or "quick-add" in cls or "quickadd" in low or "showquickview" in low:
+            return data_url
+    return None
+
+
+def parse_listing_html(html, min_discount=0):
+    """Extract discounted product tiles from a rendered listing page's HTML.
+
+    Returns a list of item dicts. Tiles without a usable sale/list price pair, or
+    whose discount does not exceed ``min_discount``, are skipped.
+    """
+    root = _build_dom(html)
+    items = []
+    seen_pids = set()
+    for tile in root.iter():
+        pid = tile.attr("data-pid")
+        if not pid or pid in seen_pids:
+            continue
+        sale_price, list_price = _tile_prices(tile)
+        if not sale_price or not list_price or list_price <= 0:
+            continue
+        discount_percent = round((list_price - sale_price) * 100 / list_price, 1)
+        if discount_percent <= min_discount:
+            continue
+
+        link = _tile_link(tile)
+        image = _tile_image(tile)
+        qa = _tile_qa_url(tile)
+        seen_pids.add(pid)
+        items.append({
+            "pid": pid,
+            "name": _tile_name(tile),
+            "original_price": int(list_price),
+            "sale_price": int(sale_price),
+            "discount_percent": discount_percent,
+            "image_url": urljoin(BASE, image) if image else None,
+            "product_link": urljoin(BASE, link) if link else None,
+            "qa_url": urljoin(BASE, qa) if qa else None,
+        })
+    return items
+
+
 def fetch_discounted_products():
     min_discount = 0
     min_color_discount = 50
@@ -954,144 +1218,47 @@ def fetch_discounted_products():
     wait_timeout = 30
     delay_between_pages = 1.5
 
-    # ---------- 第 1 轮：只收集主列表信息 + qa_url（不跳走页面） ----------
+    # ---------- 第 1 轮：渲染每页并用 parse_listing_html 解析列表 ----------
+    drv = _get_driver()
     items = []
     seen_pids = set()
-    wait_selector = (
-        "div.product[data-pid], "
-        "div.product-grid__tile[data-pid], "
-        "div[data-pid].product-grid__tile"
-    )
+    # 改版に強い待機条件：テーマ依存のクラスではなく data-pid の出現を待つ。
+    wait_selector = "[data-pid]"
     page = 1
-    prev_tiles_count = 0
     while True:
+        if max_pages and page > max_pages:
+            print(f"[paging] reached max_pages={max_pages}, stop")
+            break
         url = f"{BASE}/shop/web-specials?page={page}"
         print(f"[page {page}] fetching {url}")
         try:
-            driver.get(url)
+            drv.get(url)
         except Exception as exc:
             print(f"[page {page}] navigation error: {exc}")
             break
         try:
-            ready_state = driver.execute_script("return document.readyState")
-            print(f"[page {page}] readyState = {ready_state}")
-        except Exception as exc:
-            print(f"[page {page}] readyState fetch error: {exc}")
-
-        try:
-            WebDriverWait(driver, wait_timeout).until(
+            WebDriverWait(drv, wait_timeout).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, wait_selector))
             )
         except TimeoutException:
-            print(f"[page {page}] wait timeout, stop paging")
+            print(f"[page {page}] wait timeout (no [data-pid]), stop paging")
             break
 
-        tiles = driver.find_elements(By.CSS_SELECTOR, "div.product[data-pid]")
-        print(f"[page {page}] tiles(div.product[data-pid]) = {len(tiles)}")
-        if not tiles:
-            tiles = driver.find_elements(By.CSS_SELECTOR, "div.product-grid__tile[data-pid]")
-            print(f"[page {page}] tiles(div.product-grid__tile[data-pid]) = {len(tiles)}")
-        if not tiles:
-            tiles = driver.find_elements(By.CSS_SELECTOR, "div[data-pid].product-grid__tile")
-            print(f"[page {page}] tiles(div[data-pid].product-grid__tile) = {len(tiles)}")
-        if not tiles:
-            tiles = driver.find_elements(By.CSS_SELECTOR, "div.product[data-pid] > product-tile")
-            print(f"[page {page}] tiles(div.product[data-pid] > product-tile) = {len(tiles)}")
-        if not tiles:
-            shadow_tiles = driver.find_elements(By.CSS_SELECTOR, "product-tile")
-            print(f"[page {page}] tiles(product-tile) = {len(shadow_tiles)}")
-            if shadow_tiles:
-                try:
-                    first_shadow = shadow_tiles[0]
-                    outer_html = first_shadow.get_attribute("outerHTML")
-                    snippet = outer_html[:2000]
-                    print(f"[page {page}] shadow product tile snippet:\n{snippet}")
-                except Exception:
-                    pass
-        print(f"[page {page}] final tiles count: {len(tiles)}")
-        if not tiles:
-            print(f"[page {page}] no tiles, stop paging")
-            try:
-                snippet = driver.page_source[:2000]
-                print(f"[page {page}] page source snippet:\n{snippet}")
-            except Exception:
-                pass
-            break
+        page_items = parse_listing_html(drv.page_source, min_discount=min_discount)
+        print(f"[page {page}] parsed {len(page_items)} discounted tiles")
 
-        new_tiles_count = len(tiles)
-        if new_tiles_count == prev_tiles_count:
-            print(f"[paging] no new products found on page {page}, stop")
+        new_items = [it for it in page_items if it["pid"] not in seen_pids]
+        if not new_items:
+            print(f"[paging] no new products on page {page}, stop")
             break
-
-        prev_tiles_count = new_tiles_count
+        for it in new_items:
+            seen_pids.add(it["pid"])
+            items.append(it)
 
         page += 1
         time.sleep(delay_between_pages)
 
-    for idx, tile in enumerate(tiles, start=1):
-        try:
-            pid = tile.get_attribute("data-pid")
-            if pid and pid in seen_pids:
-                continue
-
-            name_el = _first_or_none(tile, By.CSS_SELECTOR, ".pdp-link .product-tile__name")
-            product_name = name_el.text.strip() if name_el else ""
-
-            link_el = _first_or_none(tile, By.CSS_SELECTOR, ".pdp-link a.link[itemprop='url']")
-            product_link = urljoin(BASE, link_el.get_attribute("href")) if link_el else None
-
-            # 优先 <product-tile-pricing> 属性
-            ptp = _first_or_none(tile, By.CSS_SELECTOR, "product-tile-pricing")
-            sale_price = _num(ptp.get_attribute("sale-price")) if ptp else None
-            list_price = _num(ptp.get_attribute("list-price")) if ptp else None
-
-            # 放宽兜底选择器：在整卡片里找任意带data价格的元素
-            if sale_price is None or list_price is None:
-                any_price_el = _first_or_none(
-                    tile, By.CSS_SELECTOR, "[data-sale-price][data-list-price]"
-                )
-                if any_price_el:
-                    sale_price = sale_price or _num(any_price_el.get_attribute("data-sale-price"))
-                    list_price = list_price or _num(any_price_el.get_attribute("data-list-price"))
-
-            if not sale_price or not list_price or list_price <= 0:
-                print(f"[skip page {page} #{idx}] price missing")
-                continue
-
-            discount_percent = round((list_price - sale_price) * 100 / list_price, 1)
-            if discount_percent <= min_discount:
-                print(f"[skip page {page} #{idx}] discount {discount_percent}% <= {min_discount}%")
-                continue
-            # 图片
-            img_meta = (_first_or_none(
-                tile, By.CSS_SELECTOR, ".product-tile__image.default.active meta[itemprop='image']"
-            ) or _first_or_none(
-                tile, By.CSS_SELECTOR, ".product-tile__cover meta[itemprop='image']"
-            ))
-            image_url = img_meta.get_attribute("content") if img_meta else None
-
-            # 记录 quick add 片段地址（不要现在跳）
-            qa_btn = _first_or_none(
-                tile, By.CSS_SELECTOR,
-                ".product-tile__quickadd-container .tile-quickadd-btn[data-url]"
-            )
-            qa_url = urljoin(BASE, qa_btn.get_attribute("data-url")) if qa_btn else None
-
-            items.append({
-                "pid": pid,
-                "name": product_name,
-                "original_price": int(list_price),
-                "sale_price": int(sale_price),
-                "discount_percent": discount_percent,
-                "image_url": image_url,
-                "product_link": product_link,
-                "qa_url": qa_url,    # 第二轮再用
-            })
-            if pid:
-                seen_pids.add(pid)
-                
-        except Exception as e:
-            print(f"[collect error page {page} #{idx}] {e}")
+    print(f"[round1] collected {len(items)} discounted products across {page} page(s)")
 
     # ---------- 第 2 轮：为每个 item 在新标签页里采集尺码 ----------
     main_window = driver.current_window_handle
@@ -1173,10 +1340,11 @@ def fetch_discounted_products():
 
     items = processed_items
 
-    # ---------- 生成 HTML ----------
-    utc_now = datetime.utcnow()
-    jst = pytz.timezone("Asia/Tokyo")
-    execution_time = utc_now.astimezone(jst).strftime("%Y-%m-%d %H:%M:%S")
+    return items, render_products_html(items)
+
+
+def render_products_html(items):
+    execution_time = datetime.now(timezone.utc).astimezone(JST).strftime("%Y-%m-%d %H:%M:%S")
 
     html_content = f"""
     <!DOCTYPE html>
@@ -1202,6 +1370,7 @@ def fetch_discounted_products():
     """
 
     for p in items:
+        sizes = p.get("sizes") or []
         html_content += f"""
         <div class="product">
             <h2>{p['name']}</h2>
@@ -1211,7 +1380,7 @@ def fetch_discounted_products():
             <p class="original-price">Original Price: ¥ {p['original_price']:,}</p>
             <p class="price">Sale Price: ¥ {p['sale_price']:,}</p>
             <p>Discount Percent: {p['discount_percent']}%</p>
-            <p class="sizes">Sizes: {" | ".join(p['sizes']) if p['sizes'] else "-"}</p>
+            <p class="sizes">Sizes: {" | ".join(sizes) if sizes else "-"}</p>
         </div>
         """
 
@@ -1219,7 +1388,7 @@ def fetch_discounted_products():
     </body>
     </html>
     """
-    return items, html_content
+    return html_content
 
 def upload_to_gist(content):
     gist_data = _upsert_gist(
@@ -1267,11 +1436,54 @@ def main():
         )
 
 
+def run_offline(html_path, output_html=None):
+    """Parse a saved web-specials page (no browser / network) and report results.
+
+    Lets us verify the listing parser against a real rendered page on one page,
+    which is exactly what is needed to confirm the redesign selectors work.
+    """
+    with open(html_path, encoding="utf-8") as fp:
+        html = fp.read()
+
+    items = parse_listing_html(html, min_discount=0)
+    print(f"[offline] {html_path}: parsed {len(items)} discounted product tiles")
+    for it in items:
+        name = it["name"] or "(no name)"
+        print(
+            f"  - [{it['pid']}] {name} | ¥{it['sale_price']:,}"
+            f" (was ¥{it['original_price']:,}) -{it['discount_percent']}%"
+        )
+        print(f"      link: {it['product_link']}")
+
+    if output_html:
+        with open(output_html, "w", encoding="utf-8") as fp:
+            fp.write(render_products_html(items))
+        print(f"[offline] wrote preview HTML to {output_html}")
+    return items
+
+
 if __name__ == "__main__":
-    try:
-        main()
-    finally:
+    arg_parser = argparse.ArgumentParser(description="Patagonia web-specials discount checker")
+    arg_parser.add_argument(
+        "--html",
+        metavar="FILE",
+        help="Parse a saved web-specials HTML file offline (no browser/network) and exit.",
+    )
+    arg_parser.add_argument(
+        "--out",
+        metavar="FILE",
+        help="With --html, also write a preview HTML of the parsed products.",
+    )
+    args, _ = arg_parser.parse_known_args()
+
+    if args.html:
+        run_offline(args.html, output_html=args.out)
+    else:
         try:
-            driver.quit()
-        except Exception:
-            pass
+            main()
+        finally:
+            if driver is not None:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
