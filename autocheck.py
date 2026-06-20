@@ -1229,73 +1229,147 @@ def parse_listing_html(html, min_discount=0):
     return items
 
 
+def _find_show_more_button(drv):
+    """Locate a visible "Show more / もっと見る" pagination button, if present.
+
+    SFCC listing grids load a fixed first batch and append the rest into the
+    same page via an AJAX "show more" button (or infinite scroll). The button is
+    what advances pagination — query params like ?page / ?start are reset by the
+    front-end JS — so we must find and click it to load every product.
+    """
+    selectors = (
+        "div.show-more button",
+        "div.show-more a",
+        "button.show-more",
+        "a.show-more",
+        "button.btn-show-more",
+        ".show-more-button",
+        "button.more",
+        "[data-url*='UpdateGrid']",
+        "[data-url*='Search-Show']",
+        "button[class*='more']",
+        "a[class*='more']",
+    )
+    for selector in selectors:
+        try:
+            elements = drv.find_elements(By.CSS_SELECTOR, selector)
+        except Exception:
+            continue
+        for el in elements:
+            try:
+                if el.is_displayed():
+                    return el
+            except Exception:
+                continue
+
+    # 文本兜底：按钮文案可能是「もっと見る」「Show more」等。
+    text_markers = ("もっと", "さらに", "show more", "view more", "load more", "more results")
+    try:
+        clickables = drv.find_elements(By.XPATH, "//button | //a")
+    except Exception:
+        clickables = []
+    for el in clickables:
+        try:
+            if not el.is_displayed():
+                continue
+            raw = (el.text or "").strip()
+            low = raw.lower()
+            if low == "more" or any(marker in low or marker in raw for marker in text_markers):
+                return el
+        except Exception:
+            continue
+    return None
+
+
+def _expand_listing(drv, wait_timeout, max_iterations=300):
+    """Scroll + click "show more" until no further product tiles load.
+
+    Returns the fully-expanded page HTML so the listing parser sees every
+    product, not just the first batch.
+    """
+    last_count = len(collect_tile_pids(drv.page_source))
+    print(f"[expand] initial tiles: {last_count}")
+    for i in range(max_iterations):
+        try:
+            drv.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        except Exception:
+            pass
+
+        button = _find_show_more_button(drv)
+        if button is not None:
+            try:
+                drv.execute_script("arguments[0].scrollIntoView({block: 'center'});", button)
+                time.sleep(0.3)
+                drv.execute_script("arguments[0].click();", button)
+            except Exception as exc:
+                print(f"[expand] click error: {exc}")
+
+        # 等待瓦片数量增长（无按钮时只等待少量时间给懒加载/滚动反应）。
+        try:
+            WebDriverWait(drv, wait_timeout if button is not None else 3).until(
+                lambda d: len(collect_tile_pids(d.page_source)) > last_count
+            )
+        except TimeoutException:
+            pass
+
+        count = len(collect_tile_pids(drv.page_source))
+        print(
+            f"[expand] step {i + 1}: tiles {last_count} -> {count}"
+            f" (show_more={'yes' if button is not None else 'no'})"
+        )
+        if count <= last_count and button is None:
+            break
+        last_count = count
+
+    return drv.page_source
+
+
 def fetch_discounted_products():
     min_discount = 0
     min_color_discount = 50
-    page_size = 48  # Salesforce Commerce Cloud grid size (sz parameter)
-    max_pages = 100  # 安全上限，避免站点忽略分页参数时陷入死循环
+    page_size = 48  # 初始请求一个较大的 sz，站点接受时可减少 show-more 次数
     wait_timeout = 30
-    delay_between_pages = 1.5
 
-    # ---------- 第 1 轮：渲染每页并用 parse_listing_html 解析列表 ----------
-    # patagonia.jp 基于 Salesforce Commerce Cloud（Demandware），列表分页使用
-    # start（偏移量）+ sz（每页数量），而不是 ?page=N。用 ?page=N 会被忽略，
-    # 导致每一页都返回第一页内容，于是只抓到一页。这里改为 start/sz 遍历。
+    # ---------- 第 1 轮：加载列表页并展开全部商品，再用 parse_listing_html 解析 ----------
+    # patagonia.jp 基于 Salesforce Commerce Cloud（Demandware）。列表页只首屏渲染
+    # 一批商品，其余通过「もっと見る / Show more」按钮（或下拉懒加载）AJAX 追加到
+    # 同一个页面。?page / ?start 等查询参数会被前端 JS 重置，所以必须反复点击
+    # show-more 把所有页都展开后再解析，否则只会拿到第一页。
     drv = _get_driver()
     items = []
-    seen_pids = set()        # 已收录的折扣商品 pid
-    seen_raw_pids = set()    # 已见过的全部商品 pid（含原价），用于判断是否到末页
-    # 改版に強い待機条件：テーマ依存のクラスではなく data-pid の出現を待つ。
+    seen_pids = set()
     wait_selector = "[data-pid]"
-    page = 1
-    start = 0
-    while True:
-        if page > max_pages:
-            print(f"[paging] reached max_pages={max_pages}, stop")
-            break
-        url = f"{BASE}/shop/web-specials?start={start}&sz={page_size}"
-        print(f"[page {page}] fetching {url}")
-        try:
-            drv.get(url)
-        except Exception as exc:
-            print(f"[page {page}] navigation error: {exc}")
-            break
-        try:
-            WebDriverWait(drv, wait_timeout).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, wait_selector))
-            )
-        except TimeoutException:
-            print(f"[page {page}] wait timeout (no [data-pid]), stop paging")
-            break
 
-        page_source = drv.page_source
-        raw_pids = collect_tile_pids(page_source)
-        if not raw_pids:
-            print(f"[paging] no product tiles on page {page}, stop")
-            break
+    url = f"{BASE}/shop/web-specials?sz={page_size}"
+    print(f"[round1] fetching {url}")
+    try:
+        drv.get(url)
+    except Exception as exc:
+        print(f"[round1] navigation error: {exc}")
+        return [], render_products_html([])
 
-        new_raw_pids = [pid for pid in raw_pids if pid not in seen_raw_pids]
-        if not new_raw_pids:
-            # 没有任何新商品出现：站点要么到达末页，要么忽略了分页参数。
-            print(f"[paging] no new product tiles on page {page}, stop")
-            break
-        seen_raw_pids.update(raw_pids)
-
-        page_items = parse_listing_html(page_source, min_discount=min_discount)
-        new_items = [it for it in page_items if it["pid"] not in seen_pids]
-        print(
-            f"[page {page}] {len(raw_pids)} tiles ({len(new_raw_pids)} new),"
-            f" {len(page_items)} discounted, {len(new_items)} new discounted"
+    try:
+        WebDriverWait(drv, wait_timeout).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, wait_selector))
         )
-        for it in new_items:
-            seen_pids.add(it["pid"])
-            items.append(it)
+    except TimeoutException:
+        print("[round1] wait timeout (no [data-pid])")
+        return [], render_products_html([])
 
-        page += 1
-        start += page_size
-        time.sleep(delay_between_pages)
+    full_html = _expand_listing(drv, wait_timeout)
+    raw_total = len(collect_tile_pids(full_html))
 
-    print(f"[round1] collected {len(items)} discounted products across {page} page(s)")
+    page_items = parse_listing_html(full_html, min_discount=min_discount)
+    for it in page_items:
+        if it["pid"] in seen_pids:
+            continue
+        seen_pids.add(it["pid"])
+        items.append(it)
+
+    print(
+        f"[round1] expanded to {raw_total} product tiles,"
+        f" {len(items)} discounted products"
+    )
 
     # ---------- 第 2 轮：为每个 item 在新标签页里采集尺码 ----------
     main_window = driver.current_window_handle
