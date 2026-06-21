@@ -21,6 +21,7 @@ EC = None
 WebDriverWait = None
 NoSuchElementException = Exception
 TimeoutException = Exception
+WebDriverException = Exception
 driver = None
 
 # Asia/Tokyo is a fixed +9 offset with no DST, so we avoid the pytz dependency.
@@ -60,13 +61,27 @@ MAX_TELEGRAM_ITEMS = 8
 TEST_STOP_AFTER_FILTERED_PRODUCTS = 0  # 0 means full run.
 TEST_REQUIRE_COLOR_PRICE_DATA = False  # True means test stops only after actual per-color price filtering.
 
+# 第 2 轮抓尺码加速 / 防卡死参数。
+# tile 折扣是商品整体折扣，单颜色可能更深，所以预筛阈值在 min_color_discount 基础上
+# 减去这个余量，避免漏掉「只有某个颜色深折」的商品。设大→更全更慢，设小→更快但可能漏。
+SIZE_PREFILTER_MARGIN = 15
+# 第 2 轮里连续这么多次 driver 级错误（Chrome 崩溃 / 命令超时）就判定浏览器已死，
+# 提前结束尺码采集、返回已抓到的部分，而不是对剩余每件都白等一次命令超时。
+MAX_CONSECUTIVE_DRIVER_ERRORS = 3
+# Selenium 命令 / 页面加载超时（秒）。命令超时把「chromedriver socket 永久阻塞」变成
+# 可捕获的异常，是这次 1 小时卡死的根因修复。
+DRIVER_COMMAND_TIMEOUT = 60
+DRIVER_PAGE_LOAD_TIMEOUT = 60
+
 def _ensure_selenium():
     """Import selenium on demand and expose the symbols used by the online flow."""
     global webdriver, By, EC, WebDriverWait, NoSuchElementException, TimeoutException
+    global WebDriverException
     from selenium import webdriver as _webdriver
     from selenium.common.exceptions import (
         NoSuchElementException as _NoSuchElementException,
         TimeoutException as _TimeoutException,
+        WebDriverException as _WebDriverException,
     )
     from selenium.webdriver.common.by import By as _By
     from selenium.webdriver.support import expected_conditions as _EC
@@ -78,6 +93,7 @@ def _ensure_selenium():
     WebDriverWait = _WebDriverWait
     NoSuchElementException = _NoSuchElementException
     TimeoutException = _TimeoutException
+    WebDriverException = _WebDriverException
 
 
 class BotBlockedError(RuntimeError):
@@ -142,6 +158,19 @@ def _get_driver():
     options.add_experimental_option("useAutomationExtension", False)
     options.add_experimental_option("prefs", {"intl.accept_languages": "ja-JP,ja,en-US,en"})
     driver = webdriver.Chrome(options=options)
+
+    # 防卡死：给页面加载和底层命令都设超时。命令超时尤其关键——当 Chrome 崩溃后
+    # chromedriver 的 socket 可能进入半开状态、read() 永久阻塞（这次跑 1h19m 还 0% CPU
+    # 就是卡在这里）。设了超时后，阻塞会在 DRIVER_COMMAND_TIMEOUT 秒后抛异常，让上层能
+    # 捕获并中止，而不是无限等待。
+    try:
+        driver.set_page_load_timeout(DRIVER_PAGE_LOAD_TIMEOUT)
+    except Exception as exc:
+        print(f"[driver] set_page_load_timeout failed: {exc}")
+    try:
+        driver.command_executor.set_timeout(DRIVER_COMMAND_TIMEOUT)
+    except Exception as exc:
+        print(f"[driver] command timeout setup failed: {exc}")
 
     # 用真实 Chrome 版本号覆盖 UA（去掉 HeadlessChrome 标记），避免 UA 版本对不上 /
     # 出现无头特征而被反爬识别。运行时读取真实 navigator.userAgent，再做最小修补。
@@ -649,12 +678,11 @@ def _fetch_sizes_from_quick_add(qa_url):
 def _fetch_sizes_from_product_page(product_url, main_window):
     if not product_url:
         return []
-    try:
-        driver.execute_script("window.open(arguments[0], '_blank');", product_url)
-        print(f"[sizes product] open {product_url}")
-    except Exception as exc:
-        print(f"[sizes product] failed to open tab for {product_url}: {exc}")
-        return []
+    # 开新标签失败基本都是 driver/浏览器层问题（Chrome 崩溃、命令超时），不是「该商品没
+    # 尺码」。让异常向上抛给第 2 轮循环统一处理（计数 + 探测 driver 死活、必要时提前中止），
+    # 否则会对剩余每一件都各白等一次命令超时。
+    driver.execute_script("window.open(arguments[0], '_blank');", product_url)
+    print(f"[sizes product] open {product_url}")
 
     color_sizes = []
     try:
@@ -1370,6 +1398,11 @@ def _expand_listing(drv, wait_timeout, max_iterations=300):
     """
     last_count = len(collect_tile_pids(drv.page_source))
     print(f"[expand] initial tiles: {last_count}")
+    # patagonia.jp 的「もっと見る」按钮在全部商品加载完后仍留在 DOM 里（点了
+    # 不再追加瓦片），所以不能用「按钮消失」当退出条件，否则会一路空转到
+    # max_iterations。改为：瓦片数连续 stagnant_limit 步不增长就判定已满载停止。
+    stagnant = 0
+    stagnant_limit = 2
     for i in range(max_iterations):
         try:
             drv.execute_script("window.scrollTo(0, document.body.scrollHeight);")
@@ -1385,9 +1418,10 @@ def _expand_listing(drv, wait_timeout, max_iterations=300):
             except Exception as exc:
                 print(f"[expand] click error: {exc}")
 
-        # 等待瓦片数量增长（无按钮时只等待少量时间给懒加载/滚动反应）。
+        # 等待瓦片数量增长；卡住时只等少量时间，避免每步都白等满 wait_timeout。
+        wait_for_growth = wait_timeout if (button is not None and stagnant == 0) else 3
         try:
-            WebDriverWait(drv, wait_timeout if button is not None else 3).until(
+            WebDriverWait(drv, wait_for_growth).until(
                 lambda d: len(collect_tile_pids(d.page_source)) > last_count
             )
         except TimeoutException:
@@ -1398,11 +1432,33 @@ def _expand_listing(drv, wait_timeout, max_iterations=300):
             f"[expand] step {i + 1}: tiles {last_count} -> {count}"
             f" (show_more={'yes' if button is not None else 'no'})"
         )
-        if count <= last_count and button is None:
-            break
+        if count <= last_count:
+            stagnant += 1
+            if stagnant >= stagnant_limit:
+                print(f"[expand] no growth for {stagnant} steps, stop at {count} tiles")
+                break
+        else:
+            stagnant = 0
         last_count = count
 
     return drv.page_source
+
+
+def _driver_alive():
+    """Cheap liveness probe for the shared driver.
+
+    A simple command (listing window handles) round-trips to chromedriver. If the
+    browser has crashed or the connection is gone it raises (bounded by the
+    command timeout set in ``_get_driver``), so we can tell "browser is dead, stop"
+    apart from "this one product just had no sizes".
+    """
+    if driver is None:
+        return False
+    try:
+        _ = driver.window_handles
+        return True
+    except Exception:
+        return False
 
 
 def fetch_discounted_products(min_color_discount=50, fetch_sizes=True):
@@ -1491,83 +1547,117 @@ def fetch_discounted_products(min_color_discount=50, fetch_sizes=True):
         )
         return filtered, render_products_html(filtered)
 
-    # ---------- 第 2 轮：为每个 item 在新标签页里采集尺码 ----------
+    # ---------- 第 2 轮：为每个候选 item 在新标签页里采集尺码 ----------
+    # 加速：不再对全部折扣商品逐个开 PDP（之前 504 件能跑 1 小时+）。tile 折扣已明显达不到
+    # 阈值的直接跳过；保留 SIZE_PREFILTER_MARGIN 的余量，给「整体折扣不深但单色深折」的商品
+    # 留机会，避免误杀。
+    prefilter_threshold = max(0, min_color_discount - SIZE_PREFILTER_MARGIN)
+    candidates = [
+        it for it in items
+        if (it.get("discount_percent") or 0) >= prefilter_threshold
+    ]
+    print(
+        f"[round2] prefilter: {len(items)} discounted -> {len(candidates)} candidates"
+        f" at tile-discount >= {prefilter_threshold}% (fetching sizes for these)"
+    )
+
     main_window = driver.current_window_handle
     processed_items = []
-    for it in items:
-        qa_url = it.get("qa_url")
-        product_link = it.get("product_link")
-        sizes = []
+    consecutive_errors = 0  # 连续 driver 级错误计数，用于提前判定浏览器已死
+    total = len(candidates)
+    for idx, it in enumerate(candidates, 1):
+        print(f"[round2] {idx}/{total} {it.get('name')}")
+        try:
+            qa_url = it.get("qa_url")
+            product_link = it.get("product_link")
+            sizes = []
 
-        color_size_groups = _fetch_sizes_from_product_page(product_link, main_window)
+            color_size_groups = _fetch_sizes_from_product_page(product_link, main_window)
+            consecutive_errors = 0  # driver 正常响应了，重置连续错误计数
 
-        if not color_size_groups and qa_url:
-            quick_sizes = _fetch_sizes_from_quick_add(qa_url)
-            if quick_sizes:
-                color_size_groups = [{"color": None, "sizes": quick_sizes}]
-                print(f"[sizes quickadd] collected {len(quick_sizes)} sizes for {qa_url}")
+            if not color_size_groups and qa_url:
+                quick_sizes = _fetch_sizes_from_quick_add(qa_url)
+                if quick_sizes:
+                    color_size_groups = [{"color": None, "sizes": quick_sizes}]
+                    print(f"[sizes quickadd] collected {len(quick_sizes)} sizes for {qa_url}")
 
-        fallback_color = _infer_color_from_image_url(
-            it.get("image_url"),
-            color_size_groups,
-        )
-        color_size_groups = _filter_groups_by_discount(
-            color_size_groups,
-            min_discount=min_color_discount,
-            product_name=it.get("name"),
-            fallback_color=fallback_color,
-            fallback_sale=it.get("sale_price"),
-            fallback_list=it.get("original_price"),
-        )
-        has_color_price_data = any(
-            group.get("sale_price") and group.get("list_price") and group.get("list_price") > 0
-            for group in color_size_groups
-        )
-
-        for group in color_size_groups:
-            g_sale = group.get("sale_price")
-            g_list = group.get("list_price")
-            if g_sale and g_list and g_list > 0:
-                it["sale_price"] = int(g_sale)
-                it["original_price"] = int(g_list)
-                it["discount_percent"] = round((g_list - g_sale) * 100 / g_list, 1)
-                break
-
-        for group in color_size_groups:
-            color_label = group.get("color") or ""
-            size_text = " ".join(group.get("sizes", []))
-            if not size_text:
-                continue
-            if color_label:
-                sizes.append(f"{color_label}: {size_text}")
-            else:
-                sizes.append(size_text)
-
-        it["sizes"] = sizes
-        if not sizes:
-            print(
-                f"[filter] {it.get('name')}: no colors at >= {min_color_discount}%"
-                " discount with stock, dropping product"
+            fallback_color = _infer_color_from_image_url(
+                it.get("image_url"),
+                color_size_groups,
             )
-            continue
+            color_size_groups = _filter_groups_by_discount(
+                color_size_groups,
+                min_discount=min_color_discount,
+                product_name=it.get("name"),
+                fallback_color=fallback_color,
+                fallback_sale=it.get("sale_price"),
+                fallback_list=it.get("original_price"),
+            )
+            has_color_price_data = any(
+                group.get("sale_price") and group.get("list_price") and group.get("list_price") > 0
+                for group in color_size_groups
+            )
 
-        if TEST_STOP_AFTER_FILTERED_PRODUCTS:
-            if sizes and (has_color_price_data or not TEST_REQUIRE_COLOR_PRICE_DATA):
-                processed_items.append(it)
-                if len(processed_items) >= TEST_STOP_AFTER_FILTERED_PRODUCTS:
-                    test_mode = (
-                        "color-filtered"
-                        if has_color_price_data
-                        else "sizes-only/no per-color price data"
-                    )
-                    print(
-                        f"[test] stop after {len(processed_items)} test product(s)"
-                        f" ({test_mode})"
-                    )
+            for group in color_size_groups:
+                g_sale = group.get("sale_price")
+                g_list = group.get("list_price")
+                if g_sale and g_list and g_list > 0:
+                    it["sale_price"] = int(g_sale)
+                    it["original_price"] = int(g_list)
+                    it["discount_percent"] = round((g_list - g_sale) * 100 / g_list, 1)
                     break
-            continue
 
-        processed_items.append(it)
+            for group in color_size_groups:
+                color_label = group.get("color") or ""
+                size_text = " ".join(group.get("sizes", []))
+                if not size_text:
+                    continue
+                if color_label:
+                    sizes.append(f"{color_label}: {size_text}")
+                else:
+                    sizes.append(size_text)
+
+            it["sizes"] = sizes
+            if not sizes:
+                print(
+                    f"[filter] {it.get('name')}: no colors at >= {min_color_discount}%"
+                    " discount with stock, dropping product"
+                )
+                continue
+
+            if TEST_STOP_AFTER_FILTERED_PRODUCTS:
+                if sizes and (has_color_price_data or not TEST_REQUIRE_COLOR_PRICE_DATA):
+                    processed_items.append(it)
+                    if len(processed_items) >= TEST_STOP_AFTER_FILTERED_PRODUCTS:
+                        test_mode = (
+                            "color-filtered"
+                            if has_color_price_data
+                            else "sizes-only/no per-color price data"
+                        )
+                        print(
+                            f"[test] stop after {len(processed_items)} test product(s)"
+                            f" ({test_mode})"
+                        )
+                        break
+                continue
+
+            processed_items.append(it)
+        except Exception as exc:
+            # 防卡死：单件失败不拖垮整轮。探测 driver 是否还活着——若已死或连续多次失败，
+            # 提前收尾、返回已抓到的部分，而不是对剩余每件都白等一次命令超时。
+            consecutive_errors += 1
+            alive = _driver_alive()
+            print(
+                f"[round2] error {consecutive_errors}/{MAX_CONSECUTIVE_DRIVER_ERRORS}"
+                f" on {it.get('name')}: {exc} (driver_alive={alive})"
+            )
+            if (not alive) or consecutive_errors >= MAX_CONSECUTIVE_DRIVER_ERRORS:
+                print(
+                    f"[round2] browser unhealthy; stopping size collection early,"
+                    f" keeping {len(processed_items)} product(s) collected so far"
+                )
+                break
+            continue
 
     items = processed_items
 
