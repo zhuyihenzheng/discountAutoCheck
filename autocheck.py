@@ -7,6 +7,8 @@ from html.parser import HTMLParser
 from urllib.parse import urljoin
 
 import os
+import sys
+
 import requests
 
 # Selenium / pytz are imported lazily so that offline HTML parsing (used to
@@ -1403,9 +1405,8 @@ def _expand_listing(drv, wait_timeout, max_iterations=300):
     return drv.page_source
 
 
-def fetch_discounted_products():
+def fetch_discounted_products(min_color_discount=50, fetch_sizes=True):
     min_discount = 0
-    min_color_discount = 50
     page_size = 48  # 初始请求一个较大的 sz，站点接受时可减少 show-more 次数
     wait_timeout = 30
 
@@ -1476,6 +1477,19 @@ def fetch_discounted_products():
         f"[round1] expanded to {raw_total} product tiles,"
         f" {len(items)} discounted products"
     )
+
+    # 快速模式：跳过逐商品的尺码采集（第 2 轮要为每个商品新开标签页加载 PDP，48 件
+    # 要好几分钟）。直接按一览页的整体折扣过滤后返回，适合本地「先看有哪些折扣」。
+    if not fetch_sizes:
+        filtered = [
+            it for it in items
+            if (it.get("discount_percent") or 0) >= min_color_discount
+        ]
+        print(
+            f"[fast] {len(items)} discounted tiles ->"
+            f" {len(filtered)} at >= {min_color_discount}% (sizes skipped)"
+        )
+        return filtered, render_products_html(filtered)
 
     # ---------- 第 2 轮：为每个 item 在新标签页里采集尺码 ----------
     main_window = driver.current_window_handle
@@ -1687,7 +1701,74 @@ def run_offline(html_path, output_html=None):
     return items
 
 
+def run_local(
+    min_color_discount=50,
+    out_path="discounted_products.html",
+    open_browser=False,
+    fetch_sizes=False,
+):
+    """Run the live scrape locally and write results to an HTML file — no Gist /
+    Telegram / state, no credentials needed.
+
+    This is the path for a manual run from your own (residential) IP, which gets
+    past Akamai where GitHub's datacenter IP does not. By default it skips the
+    slow per-product size lookup (``fetch_sizes=False``) so you see the discounted
+    list in seconds; pass ``fetch_sizes=True`` (CLI ``--with-sizes``) for the full
+    per-color size detail, which opens a tab per product and takes minutes.
+
+    It prints a transparent summary (raw discounted tiles found vs. how many
+    survive the discount threshold) so a small/empty result is explainable rather
+    than looking like a silent failure.
+    """
+    try:
+        items, html_content = fetch_discounted_products(
+            min_color_discount=min_color_discount,
+            fetch_sizes=fetch_sizes,
+        )
+    except BotBlockedError as exc:
+        print(f"[local] blocked: {exc}")
+        print(
+            "[local] this run was served Akamai's bot wall. From a normal home/mobile"
+            " network this should not happen — check your connection / VPN and retry."
+        )
+        return []
+
+    with open(out_path, "w", encoding="utf-8") as fp:
+        fp.write(html_content)
+
+    print(f"\n[local] {len(items)} product(s) at >= {min_color_discount}% off:")
+    for it in items:
+        sizes = it.get("sizes") or []
+        print(
+            f"  - [{it['pid']}] {it.get('name') or '(no name)'}"
+            f" | ¥{it['sale_price']:,} (was ¥{it['original_price']:,})"
+            f" -{it['discount_percent']}%"
+        )
+        if sizes:
+            print(f"      sizes: {' | '.join(sizes)}")
+        print(f"      link: {it.get('product_link')}")
+    if not items:
+        print(
+            f"  (none at >= {min_color_discount}%. The current sale may be mostly"
+            " lighter discounts — try a lower threshold, e.g. --min-color-discount 30)"
+        )
+    print(f"\n[local] wrote preview HTML to {out_path}")
+
+    if open_browser:
+        import webbrowser
+
+        webbrowser.open("file://" + os.path.abspath(out_path))
+    return items
+
+
 if __name__ == "__main__":
+    # 进度日志按行刷新，这样即使把输出重定向到文件/管道，也能实时看到抓取进度
+    # （否则 Python 对非 TTY 输出会按块缓冲，长时间一片空白）。
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except Exception:
+        pass
+
     arg_parser = argparse.ArgumentParser(description="Patagonia web-specials discount checker")
     arg_parser.add_argument(
         "--html",
@@ -1697,12 +1778,51 @@ if __name__ == "__main__":
     arg_parser.add_argument(
         "--out",
         metavar="FILE",
-        help="With --html, also write a preview HTML of the parsed products.",
+        help="Output HTML path (with --html: preview of parsed products;"
+        " with --local: the local result page).",
+    )
+    arg_parser.add_argument(
+        "--local",
+        action="store_true",
+        help="Live scrape from this machine and save results to a local HTML file."
+        " No Gist/Telegram/state, no credentials needed (run from a home network).",
+    )
+    arg_parser.add_argument(
+        "--min-color-discount",
+        type=int,
+        default=50,
+        metavar="PCT",
+        help="Keep only colors discounted at least this %% (default: 50). Used by --local.",
+    )
+    arg_parser.add_argument(
+        "--with-sizes",
+        action="store_true",
+        help="With --local, also collect per-color sizes for each product"
+        " (accurate but slow: opens a tab per product, takes minutes).",
+    )
+    arg_parser.add_argument(
+        "--open",
+        action="store_true",
+        help="With --local, open the generated HTML in your browser when done.",
     )
     args, _ = arg_parser.parse_known_args()
 
     if args.html:
         run_offline(args.html, output_html=args.out)
+    elif args.local:
+        try:
+            run_local(
+                min_color_discount=args.min_color_discount,
+                out_path=args.out or "discounted_products.html",
+                open_browser=args.open,
+                fetch_sizes=args.with_sizes,
+            )
+        finally:
+            if driver is not None:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
     else:
         try:
             main()
