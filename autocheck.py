@@ -1,5 +1,6 @@
 import argparse
 import json
+import random
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -7,6 +8,8 @@ from html.parser import HTMLParser
 from urllib.parse import urljoin
 
 import os
+import sys
+
 import requests
 
 # Selenium / pytz are imported lazily so that offline HTML parsing (used to
@@ -19,6 +22,7 @@ EC = None
 WebDriverWait = None
 NoSuchElementException = Exception
 TimeoutException = Exception
+WebDriverException = Exception
 driver = None
 
 # Asia/Tokyo is a fixed +9 offset with no DST, so we avoid the pytz dependency.
@@ -50,6 +54,10 @@ COLOR_SELECTORS = (
     ".product-attribute__color label",
 )
 
+# 温和化：把上次成功通过 bot 墙的会话 cookie（Akamai _abck / bm_* 等）存到本地，
+# 下次复用，减少每次都从零触发挑战。best-effort——cookie 过期就被重新挑战，不会更糟。
+COOKIE_FILE = "akamai_cookies.json"
+
 PRODUCT_GIST_DESCRIPTION = "Patagonia Discounted Products"
 PRODUCT_GIST_FILE = "discounted_products.html"
 STATE_GIST_DESCRIPTION = "Patagonia Discount State"
@@ -58,13 +66,27 @@ MAX_TELEGRAM_ITEMS = 8
 TEST_STOP_AFTER_FILTERED_PRODUCTS = 0  # 0 means full run.
 TEST_REQUIRE_COLOR_PRICE_DATA = False  # True means test stops only after actual per-color price filtering.
 
+# 第 2 轮抓尺码加速 / 防卡死参数。
+# tile 折扣是商品整体折扣，单颜色可能更深，所以预筛阈值在 min_color_discount 基础上
+# 减去这个余量，避免漏掉「只有某个颜色深折」的商品。设大→更全更慢，设小→更快但可能漏。
+SIZE_PREFILTER_MARGIN = 15
+# 第 2 轮里连续这么多次 driver 级错误（Chrome 崩溃 / 命令超时）就判定浏览器已死，
+# 提前结束尺码采集、返回已抓到的部分，而不是对剩余每件都白等一次命令超时。
+MAX_CONSECUTIVE_DRIVER_ERRORS = 3
+# Selenium 命令 / 页面加载超时（秒）。命令超时把「chromedriver socket 永久阻塞」变成
+# 可捕获的异常，是这次 1 小时卡死的根因修复。
+DRIVER_COMMAND_TIMEOUT = 60
+DRIVER_PAGE_LOAD_TIMEOUT = 60
+
 def _ensure_selenium():
     """Import selenium on demand and expose the symbols used by the online flow."""
     global webdriver, By, EC, WebDriverWait, NoSuchElementException, TimeoutException
+    global WebDriverException
     from selenium import webdriver as _webdriver
     from selenium.common.exceptions import (
         NoSuchElementException as _NoSuchElementException,
         TimeoutException as _TimeoutException,
+        WebDriverException as _WebDriverException,
     )
     from selenium.webdriver.common.by import By as _By
     from selenium.webdriver.support import expected_conditions as _EC
@@ -76,10 +98,55 @@ def _ensure_selenium():
     WebDriverWait = _WebDriverWait
     NoSuchElementException = _NoSuchElementException
     TimeoutException = _TimeoutException
+    WebDriverException = _WebDriverException
+
+
+class BotBlockedError(RuntimeError):
+    """Raised when the site serves Akamai's bot-failover page instead of products.
+
+    Distinguishes "the site blocked our scraper" (0 items because of a wall) from
+    "the sale genuinely has no items" (0 items because nothing is discounted), so
+    the caller does not wipe the gist / saved state with a false empty result.
+    """
+
+
+# Markers of Akamai's "Hang Tight! Routing to checkout..." / bot-failover page.
+# When these show up, the real product grid never rendered and any 0件 is a block.
+_BOT_BLOCK_MARKERS = (
+    "hang tight",
+    "sit tight",
+    "routing to checkout",
+    "botfailover",
+    "waitroomform",
+    "現在ウェブサイトがご利用いただけません",
+)
+
+
+def _looks_blocked(drv):
+    """True if the current page is Akamai's bot/waiting-room failover, not content."""
+    try:
+        title = (drv.title or "").lower()
+    except Exception:
+        title = ""
+    if any(marker in title for marker in ("hang tight", "sit tight", "routing to checkout")):
+        return True
+    try:
+        head = (drv.page_source or "")[:6000].lower()
+    except Exception:
+        head = ""
+    return any(marker in head for marker in _BOT_BLOCK_MARKERS)
 
 
 def _get_driver():
-    """Create (once) and return the headless Chrome driver."""
+    """Create (once) and return a headless Chrome driver tuned to look human.
+
+    patagonia.jp sits behind Akamai Bot Manager. A stock Selenium session (old
+    user-agent, ``navigator.webdriver === true``, the "enable-automation" switch,
+    a ``HeadlessChrome`` UA token) is trivially fingerprinted and served the
+    bot-failover page instead of products. We strip those tells so the grid has a
+    chance to render. This does not defeat IP-reputation checks, but it removes
+    the cheap browser-side signals that flag the request before IP is even weighed.
+    """
     global driver
     if driver is not None:
         return driver
@@ -88,12 +155,100 @@ def _get_driver():
     options.add_argument("--headless=new")  # 无头模式，后台运行
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("start-maximized")          # 最大化窗口
-    options.add_argument("disable-infobars")
+    options.add_argument("--window-size=1280,1800")
     options.add_argument("--disable-extensions")
-    options.add_argument(f"user-agent={DEFAULT_USER_AGENT}")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("--lang=ja-JP")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
+    options.add_experimental_option("prefs", {"intl.accept_languages": "ja-JP,ja,en-US,en"})
     driver = webdriver.Chrome(options=options)
+
+    # 防卡死：给页面加载和底层命令都设超时。命令超时尤其关键——当 Chrome 崩溃后
+    # chromedriver 的 socket 可能进入半开状态、read() 永久阻塞（这次跑 1h19m 还 0% CPU
+    # 就是卡在这里）。设了超时后，阻塞会在 DRIVER_COMMAND_TIMEOUT 秒后抛异常，让上层能
+    # 捕获并中止，而不是无限等待。
+    try:
+        driver.set_page_load_timeout(DRIVER_PAGE_LOAD_TIMEOUT)
+    except Exception as exc:
+        print(f"[driver] set_page_load_timeout failed: {exc}")
+    try:
+        driver.command_executor.set_timeout(DRIVER_COMMAND_TIMEOUT)
+    except Exception as exc:
+        print(f"[driver] command timeout setup failed: {exc}")
+
+    # 用真实 Chrome 版本号覆盖 UA（去掉 HeadlessChrome 标记），避免 UA 版本对不上 /
+    # 出现无头特征而被反爬识别。运行时读取真实 navigator.userAgent，再做最小修补。
+    try:
+        real_ua = driver.execute_script("return navigator.userAgent") or DEFAULT_USER_AGENT
+    except Exception:
+        real_ua = DEFAULT_USER_AGENT
+    clean_ua = real_ua.replace("HeadlessChrome", "Chrome")
+    try:
+        driver.execute_cdp_cmd(
+            "Network.setUserAgentOverride",
+            {"userAgent": clean_ua, "acceptLanguage": "ja-JP,ja;q=0.9,en;q=0.8"},
+        )
+    except Exception as exc:
+        print(f"[driver] UA override failed: {exc}")
+
+    # 隐藏 webdriver / 补全 languages、plugins、window.chrome 等指纹。
+    try:
+        driver.execute_cdp_cmd(
+            "Page.addScriptToEvaluateOnNewDocument",
+            {
+                "source": (
+                    "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
+                    "Object.defineProperty(navigator,'languages',{get:()=>['ja-JP','ja','en-US','en']});"
+                    "Object.defineProperty(navigator,'plugins',{get:()=>[1,2,3,4,5]});"
+                    "window.chrome=window.chrome||{runtime:{}};"
+                )
+            },
+        )
+    except Exception as exc:
+        print(f"[driver] stealth script failed: {exc}")
+
     return driver
+
+
+def _save_cookies(drv):
+    """Persist current cookies so the next run can warm-start a session that
+    already cleared the bot wall. Best-effort: stale cookies just get re-challenged."""
+    try:
+        cookies = drv.get_cookies()
+        with open(COOKIE_FILE, "w", encoding="utf-8") as f:
+            json.dump(cookies, f)
+        print(f"[cookies] saved {len(cookies)} cookies")
+    except Exception as exc:
+        print(f"[cookies] save failed: {exc}")
+
+
+def _load_cookies(drv):
+    """Apply saved cookies onto the driver. The driver must already be on the
+    target domain (Selenium rejects add_cookie otherwise). Returns True if any
+    cookie was applied."""
+    if not os.path.exists(COOKIE_FILE):
+        return False
+    try:
+        with open(COOKIE_FILE, "r", encoding="utf-8") as f:
+            cookies = json.load(f)
+    except Exception as exc:
+        print(f"[cookies] load failed: {exc}")
+        return False
+    applied = 0
+    for c in cookies:
+        # selenium 对部分字段挑剔：去掉 sameSite，expiry 必须是 int。
+        c.pop("sameSite", None)
+        if isinstance(c.get("expiry"), float):
+            c["expiry"] = int(c["expiry"])
+        try:
+            drv.add_cookie(c)
+            applied += 1
+        except Exception:
+            continue
+    if applied:
+        print(f"[cookies] applied {applied}/{len(cookies)} saved cookies")
+    return applied > 0
 
 
 def _num(s):
@@ -568,12 +723,11 @@ def _fetch_sizes_from_quick_add(qa_url):
 def _fetch_sizes_from_product_page(product_url, main_window):
     if not product_url:
         return []
-    try:
-        driver.execute_script("window.open(arguments[0], '_blank');", product_url)
-        print(f"[sizes product] open {product_url}")
-    except Exception as exc:
-        print(f"[sizes product] failed to open tab for {product_url}: {exc}")
-        return []
+    # 开新标签失败基本都是 driver/浏览器层问题（Chrome 崩溃、命令超时），不是「该商品没
+    # 尺码」。让异常向上抛给第 2 轮循环统一处理（计数 + 探测 driver 死活、必要时提前中止），
+    # 否则会对剩余每一件都各白等一次命令超时。
+    driver.execute_script("window.open(arguments[0], '_blank');", product_url)
+    print(f"[sizes product] open {product_url}")
 
     color_sizes = []
     try:
@@ -1229,151 +1383,341 @@ def parse_listing_html(html, min_discount=0):
     return items
 
 
-def fetch_discounted_products():
-    min_discount = 0
-    min_color_discount = 50
-    page_size = 48  # Salesforce Commerce Cloud grid size (sz parameter)
-    max_pages = 100  # 安全上限，避免站点忽略分页参数时陷入死循环
-    wait_timeout = 30
-    delay_between_pages = 1.5
+def _find_show_more_button(drv):
+    """Locate a visible "Show more / もっと見る" pagination button, if present.
 
-    # ---------- 第 1 轮：渲染每页并用 parse_listing_html 解析列表 ----------
-    # patagonia.jp 基于 Salesforce Commerce Cloud（Demandware），列表分页使用
-    # start（偏移量）+ sz（每页数量），而不是 ?page=N。用 ?page=N 会被忽略，
-    # 导致每一页都返回第一页内容，于是只抓到一页。这里改为 start/sz 遍历。
+    SFCC listing grids load a fixed first batch and append the rest into the
+    same page via an AJAX "show more" button (or infinite scroll). The button is
+    what advances pagination — query params like ?page / ?start are reset by the
+    front-end JS — so we must find and click it to load every product.
+    """
+    selectors = (
+        "div.show-more button",
+        "div.show-more a",
+        "button.show-more",
+        "a.show-more",
+        "button.btn-show-more",
+        ".show-more-button",
+        "button.more",
+        "[data-url*='UpdateGrid']",
+        "[data-url*='Search-Show']",
+        "button[class*='more']",
+        "a[class*='more']",
+    )
+    for selector in selectors:
+        try:
+            elements = drv.find_elements(By.CSS_SELECTOR, selector)
+        except Exception:
+            continue
+        for el in elements:
+            try:
+                if el.is_displayed():
+                    return el
+            except Exception:
+                continue
+
+    # 文本兜底：按钮文案可能是「もっと見る」「Show more」等。
+    text_markers = ("もっと", "さらに", "show more", "view more", "load more", "more results")
+    try:
+        clickables = drv.find_elements(By.XPATH, "//button | //a")
+    except Exception:
+        clickables = []
+    for el in clickables:
+        try:
+            if not el.is_displayed():
+                continue
+            raw = (el.text or "").strip()
+            low = raw.lower()
+            if low == "more" or any(marker in low or marker in raw for marker in text_markers):
+                return el
+        except Exception:
+            continue
+    return None
+
+
+def _expand_listing(drv, wait_timeout, max_iterations=300):
+    """Scroll + click "show more" until no further product tiles load.
+
+    Returns the fully-expanded page HTML so the listing parser sees every
+    product, not just the first batch.
+    """
+    last_count = len(collect_tile_pids(drv.page_source))
+    print(f"[expand] initial tiles: {last_count}")
+    # patagonia.jp 的「もっと見る」按钮在全部商品加载完后仍留在 DOM 里（点了
+    # 不再追加瓦片），所以不能用「按钮消失」当退出条件，否则会一路空转到
+    # max_iterations。改为：瓦片数连续 stagnant_limit 步不增长就判定已满载停止。
+    stagnant = 0
+    stagnant_limit = 2
+    for i in range(max_iterations):
+        try:
+            drv.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        except Exception:
+            pass
+
+        button = _find_show_more_button(drv)
+        if button is not None:
+            try:
+                drv.execute_script("arguments[0].scrollIntoView({block: 'center'});", button)
+                time.sleep(0.3 + random.uniform(0.1, 0.6))  # jitter：避免固定点击节奏
+                drv.execute_script("arguments[0].click();", button)
+            except Exception as exc:
+                print(f"[expand] click error: {exc}")
+
+        # 等待瓦片数量增长；卡住时只等少量时间，避免每步都白等满 wait_timeout。
+        wait_for_growth = wait_timeout if (button is not None and stagnant == 0) else 3
+        try:
+            WebDriverWait(drv, wait_for_growth).until(
+                lambda d: len(collect_tile_pids(d.page_source)) > last_count
+            )
+        except TimeoutException:
+            pass
+
+        count = len(collect_tile_pids(drv.page_source))
+        print(
+            f"[expand] step {i + 1}: tiles {last_count} -> {count}"
+            f" (show_more={'yes' if button is not None else 'no'})"
+        )
+        if count <= last_count:
+            stagnant += 1
+            if stagnant >= stagnant_limit:
+                print(f"[expand] no growth for {stagnant} steps, stop at {count} tiles")
+                break
+        else:
+            stagnant = 0
+        last_count = count
+
+    return drv.page_source
+
+
+def _driver_alive():
+    """Cheap liveness probe for the shared driver.
+
+    A simple command (listing window handles) round-trips to chromedriver. If the
+    browser has crashed or the connection is gone it raises (bounded by the
+    command timeout set in ``_get_driver``), so we can tell "browser is dead, stop"
+    apart from "this one product just had no sizes".
+    """
+    if driver is None:
+        return False
+    try:
+        _ = driver.window_handles
+        return True
+    except Exception:
+        return False
+
+
+def fetch_discounted_products(min_color_discount=50, fetch_sizes=True):
+    min_discount = 0
+    page_size = 48  # 初始请求一个较大的 sz，站点接受时可减少 show-more 次数
+    wait_timeout = 30
+
+    # ---------- 第 1 轮：加载列表页并展开全部商品，再用 parse_listing_html 解析 ----------
+    # patagonia.jp 基于 Salesforce Commerce Cloud（Demandware）。列表页只首屏渲染
+    # 一批商品，其余通过「もっと見る / Show more」按钮（或下拉懒加载）AJAX 追加到
+    # 同一个页面。?page / ?start 等查询参数会被前端 JS 重置，所以必须反复点击
+    # show-more 把所有页都展开后再解析，否则只会拿到第一页。
     drv = _get_driver()
     items = []
-    seen_pids = set()        # 已收录的折扣商品 pid
-    seen_raw_pids = set()    # 已见过的全部商品 pid（含原价），用于判断是否到末页
-    # 改版に強い待機条件：テーマ依存のクラスではなく data-pid の出現を待つ。
+    seen_pids = set()
     wait_selector = "[data-pid]"
-    page = 1
-    start = 0
-    while True:
-        if page > max_pages:
-            print(f"[paging] reached max_pages={max_pages}, stop")
-            break
-        url = f"{BASE}/shop/web-specials?start={start}&sz={page_size}"
-        print(f"[page {page}] fetching {url}")
+
+    url = f"{BASE}/shop/web-specials?sz={page_size}"
+
+    # 温和化（warm start）：先访问站点根并复用上次成功留下的 Akamai cookie，减少每次都
+    # 从零触发 bot 挑战。add_cookie 要求已在目标域上，所以先 get(BASE) 再加载 cookie。
+    try:
+        drv.get(BASE + "/")
+        time.sleep(1.0 + random.uniform(0.0, 1.5))
+        _load_cookies(drv)
+    except Exception as exc:
+        print(f"[round1] cookie warm-up skipped: {exc}")
+
+    full_html = None
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        print(f"[round1] attempt {attempt}/{max_attempts}: fetching {url}")
+        if attempt > 1:
+            # 重新发起请求前清掉可能携带的「已被标记」cookie，并带 jitter 退避一会儿。
+            try:
+                drv.delete_all_cookies()
+            except Exception:
+                pass
+            time.sleep(5 * attempt + random.uniform(0.0, 4.0))
+        else:
+            # 首次请求前也加一点随机停顿，避免固定时序特征。
+            time.sleep(random.uniform(0.5, 2.0))
         try:
             drv.get(url)
         except Exception as exc:
-            print(f"[page {page}] navigation error: {exc}")
-            break
+            print(f"[round1] attempt {attempt}: navigation error: {exc}")
+            continue
+
         try:
             WebDriverWait(drv, wait_timeout).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, wait_selector))
             )
         except TimeoutException:
-            print(f"[page {page}] wait timeout (no [data-pid]), stop paging")
-            break
+            if _looks_blocked(drv):
+                print(f"[round1] attempt {attempt}: blocked by Akamai bot-failover page")
+            else:
+                print(f"[round1] attempt {attempt}: wait timeout (no [data-pid])")
+            continue
 
-        page_source = drv.page_source
-        raw_pids = collect_tile_pids(page_source)
-        if not raw_pids:
-            print(f"[paging] no product tiles on page {page}, stop")
-            break
+        if _looks_blocked(drv):
+            print(f"[round1] attempt {attempt}: bot-failover page detected, retrying")
+            continue
 
-        new_raw_pids = [pid for pid in raw_pids if pid not in seen_raw_pids]
-        if not new_raw_pids:
-            # 没有任何新商品出现：站点要么到达末页，要么忽略了分页参数。
-            print(f"[paging] no new product tiles on page {page}, stop")
-            break
-        seen_raw_pids.update(raw_pids)
+        # 通过了 bot 墙：存下这套有效 cookie 供下次 warm start 复用。
+        _save_cookies(drv)
+        full_html = _expand_listing(drv, wait_timeout)
+        break
 
-        page_items = parse_listing_html(page_source, min_discount=min_discount)
-        new_items = [it for it in page_items if it["pid"] not in seen_pids]
+    if full_html is None:
+        if _looks_blocked(drv):
+            raise BotBlockedError(
+                f"Akamai bot-failover page returned for all {max_attempts} attempts;"
+                " 0件 here means we were blocked, not that the sale is empty"
+            )
+        print(f"[round1] no [data-pid] after {max_attempts} attempts, giving up")
+        return [], render_products_html([])
+    raw_total = len(collect_tile_pids(full_html))
+
+    page_items = parse_listing_html(full_html, min_discount=min_discount)
+    for it in page_items:
+        if it["pid"] in seen_pids:
+            continue
+        seen_pids.add(it["pid"])
+        items.append(it)
+
+    print(
+        f"[round1] expanded to {raw_total} product tiles,"
+        f" {len(items)} discounted products"
+    )
+
+    # 快速模式：跳过逐商品的尺码采集（第 2 轮要为每个商品新开标签页加载 PDP，48 件
+    # 要好几分钟）。直接按一览页的整体折扣过滤后返回，适合本地「先看有哪些折扣」。
+    if not fetch_sizes:
+        filtered = [
+            it for it in items
+            if (it.get("discount_percent") or 0) >= min_color_discount
+        ]
         print(
-            f"[page {page}] {len(raw_pids)} tiles ({len(new_raw_pids)} new),"
-            f" {len(page_items)} discounted, {len(new_items)} new discounted"
+            f"[fast] {len(items)} discounted tiles ->"
+            f" {len(filtered)} at >= {min_color_discount}% (sizes skipped)"
         )
-        for it in new_items:
-            seen_pids.add(it["pid"])
-            items.append(it)
+        return filtered, render_products_html(filtered)
 
-        page += 1
-        start += page_size
-        time.sleep(delay_between_pages)
+    # ---------- 第 2 轮：为每个候选 item 在新标签页里采集尺码 ----------
+    # 加速：不再对全部折扣商品逐个开 PDP（之前 504 件能跑 1 小时+）。tile 折扣已明显达不到
+    # 阈值的直接跳过；保留 SIZE_PREFILTER_MARGIN 的余量，给「整体折扣不深但单色深折」的商品
+    # 留机会，避免误杀。
+    prefilter_threshold = max(0, min_color_discount - SIZE_PREFILTER_MARGIN)
+    candidates = [
+        it for it in items
+        if (it.get("discount_percent") or 0) >= prefilter_threshold
+    ]
+    print(
+        f"[round2] prefilter: {len(items)} discounted -> {len(candidates)} candidates"
+        f" at tile-discount >= {prefilter_threshold}% (fetching sizes for these)"
+    )
 
-    print(f"[round1] collected {len(items)} discounted products across {page} page(s)")
-
-    # ---------- 第 2 轮：为每个 item 在新标签页里采集尺码 ----------
     main_window = driver.current_window_handle
     processed_items = []
-    for it in items:
-        qa_url = it.get("qa_url")
-        product_link = it.get("product_link")
-        sizes = []
+    consecutive_errors = 0  # 连续 driver 级错误计数，用于提前判定浏览器已死
+    total = len(candidates)
+    for idx, it in enumerate(candidates, 1):
+        print(f"[round2] {idx}/{total} {it.get('name')}")
+        try:
+            qa_url = it.get("qa_url")
+            product_link = it.get("product_link")
+            sizes = []
 
-        color_size_groups = _fetch_sizes_from_product_page(product_link, main_window)
+            color_size_groups = _fetch_sizes_from_product_page(product_link, main_window)
+            consecutive_errors = 0  # driver 正常响应了，重置连续错误计数
 
-        if not color_size_groups and qa_url:
-            quick_sizes = _fetch_sizes_from_quick_add(qa_url)
-            if quick_sizes:
-                color_size_groups = [{"color": None, "sizes": quick_sizes}]
-                print(f"[sizes quickadd] collected {len(quick_sizes)} sizes for {qa_url}")
+            if not color_size_groups and qa_url:
+                quick_sizes = _fetch_sizes_from_quick_add(qa_url)
+                if quick_sizes:
+                    color_size_groups = [{"color": None, "sizes": quick_sizes}]
+                    print(f"[sizes quickadd] collected {len(quick_sizes)} sizes for {qa_url}")
 
-        fallback_color = _infer_color_from_image_url(
-            it.get("image_url"),
-            color_size_groups,
-        )
-        color_size_groups = _filter_groups_by_discount(
-            color_size_groups,
-            min_discount=min_color_discount,
-            product_name=it.get("name"),
-            fallback_color=fallback_color,
-            fallback_sale=it.get("sale_price"),
-            fallback_list=it.get("original_price"),
-        )
-        has_color_price_data = any(
-            group.get("sale_price") and group.get("list_price") and group.get("list_price") > 0
-            for group in color_size_groups
-        )
-
-        for group in color_size_groups:
-            g_sale = group.get("sale_price")
-            g_list = group.get("list_price")
-            if g_sale and g_list and g_list > 0:
-                it["sale_price"] = int(g_sale)
-                it["original_price"] = int(g_list)
-                it["discount_percent"] = round((g_list - g_sale) * 100 / g_list, 1)
-                break
-
-        for group in color_size_groups:
-            color_label = group.get("color") or ""
-            size_text = " ".join(group.get("sizes", []))
-            if not size_text:
-                continue
-            if color_label:
-                sizes.append(f"{color_label}: {size_text}")
-            else:
-                sizes.append(size_text)
-
-        it["sizes"] = sizes
-        if not sizes:
-            print(
-                f"[filter] {it.get('name')}: no colors at >= {min_color_discount}%"
-                " discount with stock, dropping product"
+            fallback_color = _infer_color_from_image_url(
+                it.get("image_url"),
+                color_size_groups,
             )
-            continue
+            color_size_groups = _filter_groups_by_discount(
+                color_size_groups,
+                min_discount=min_color_discount,
+                product_name=it.get("name"),
+                fallback_color=fallback_color,
+                fallback_sale=it.get("sale_price"),
+                fallback_list=it.get("original_price"),
+            )
+            has_color_price_data = any(
+                group.get("sale_price") and group.get("list_price") and group.get("list_price") > 0
+                for group in color_size_groups
+            )
 
-        if TEST_STOP_AFTER_FILTERED_PRODUCTS:
-            if sizes and (has_color_price_data or not TEST_REQUIRE_COLOR_PRICE_DATA):
-                processed_items.append(it)
-                if len(processed_items) >= TEST_STOP_AFTER_FILTERED_PRODUCTS:
-                    test_mode = (
-                        "color-filtered"
-                        if has_color_price_data
-                        else "sizes-only/no per-color price data"
-                    )
-                    print(
-                        f"[test] stop after {len(processed_items)} test product(s)"
-                        f" ({test_mode})"
-                    )
+            for group in color_size_groups:
+                g_sale = group.get("sale_price")
+                g_list = group.get("list_price")
+                if g_sale and g_list and g_list > 0:
+                    it["sale_price"] = int(g_sale)
+                    it["original_price"] = int(g_list)
+                    it["discount_percent"] = round((g_list - g_sale) * 100 / g_list, 1)
                     break
-            continue
 
-        processed_items.append(it)
+            for group in color_size_groups:
+                color_label = group.get("color") or ""
+                size_text = " ".join(group.get("sizes", []))
+                if not size_text:
+                    continue
+                if color_label:
+                    sizes.append(f"{color_label}: {size_text}")
+                else:
+                    sizes.append(size_text)
+
+            it["sizes"] = sizes
+            if not sizes:
+                print(
+                    f"[filter] {it.get('name')}: no colors at >= {min_color_discount}%"
+                    " discount with stock, dropping product"
+                )
+                continue
+
+            if TEST_STOP_AFTER_FILTERED_PRODUCTS:
+                if sizes and (has_color_price_data or not TEST_REQUIRE_COLOR_PRICE_DATA):
+                    processed_items.append(it)
+                    if len(processed_items) >= TEST_STOP_AFTER_FILTERED_PRODUCTS:
+                        test_mode = (
+                            "color-filtered"
+                            if has_color_price_data
+                            else "sizes-only/no per-color price data"
+                        )
+                        print(
+                            f"[test] stop after {len(processed_items)} test product(s)"
+                            f" ({test_mode})"
+                        )
+                        break
+                continue
+
+            processed_items.append(it)
+        except Exception as exc:
+            # 防卡死：单件失败不拖垮整轮。探测 driver 是否还活着——若已死或连续多次失败，
+            # 提前收尾、返回已抓到的部分，而不是对剩余每件都白等一次命令超时。
+            consecutive_errors += 1
+            alive = _driver_alive()
+            print(
+                f"[round2] error {consecutive_errors}/{MAX_CONSECUTIVE_DRIVER_ERRORS}"
+                f" on {it.get('name')}: {exc} (driver_alive={alive})"
+            )
+            if (not alive) or consecutive_errors >= MAX_CONSECUTIVE_DRIVER_ERRORS:
+                print(
+                    f"[round2] browser unhealthy; stopping size collection early,"
+                    f" keeping {len(processed_items)} product(s) collected so far"
+                )
+                break
+            continue
 
     items = processed_items
 
@@ -1443,7 +1787,15 @@ def main():
     previous_state = load_previous_state()
     previous_snapshot = previous_state.get("snapshot") or []
 
-    items, html_content = fetch_discounted_products()
+    try:
+        items, html_content = fetch_discounted_products()
+    except BotBlockedError as exc:
+        # 被 Akamai 拦截时拿到的是 0 件假结果。绝不能用空列表覆盖 Gist / state，
+        # 否则会清空用户实际看到的清单，并在下次恢复时误报一堆「新增」。
+        print(f"[blocked] {exc}")
+        print("[blocked] keeping previous gist/state; not uploading empty result or sending telegram")
+        return
+
     gist_url = upload_to_gist(html_content)
 
     current_snapshot = _build_state_snapshot(items)
@@ -1499,7 +1851,74 @@ def run_offline(html_path, output_html=None):
     return items
 
 
+def run_local(
+    min_color_discount=50,
+    out_path="discounted_products.html",
+    open_browser=False,
+    fetch_sizes=False,
+):
+    """Run the live scrape locally and write results to an HTML file — no Gist /
+    Telegram / state, no credentials needed.
+
+    This is the path for a manual run from your own (residential) IP, which gets
+    past Akamai where GitHub's datacenter IP does not. By default it skips the
+    slow per-product size lookup (``fetch_sizes=False``) so you see the discounted
+    list in seconds; pass ``fetch_sizes=True`` (CLI ``--with-sizes``) for the full
+    per-color size detail, which opens a tab per product and takes minutes.
+
+    It prints a transparent summary (raw discounted tiles found vs. how many
+    survive the discount threshold) so a small/empty result is explainable rather
+    than looking like a silent failure.
+    """
+    try:
+        items, html_content = fetch_discounted_products(
+            min_color_discount=min_color_discount,
+            fetch_sizes=fetch_sizes,
+        )
+    except BotBlockedError as exc:
+        print(f"[local] blocked: {exc}")
+        print(
+            "[local] this run was served Akamai's bot wall. From a normal home/mobile"
+            " network this should not happen — check your connection / VPN and retry."
+        )
+        return []
+
+    with open(out_path, "w", encoding="utf-8") as fp:
+        fp.write(html_content)
+
+    print(f"\n[local] {len(items)} product(s) at >= {min_color_discount}% off:")
+    for it in items:
+        sizes = it.get("sizes") or []
+        print(
+            f"  - [{it['pid']}] {it.get('name') or '(no name)'}"
+            f" | ¥{it['sale_price']:,} (was ¥{it['original_price']:,})"
+            f" -{it['discount_percent']}%"
+        )
+        if sizes:
+            print(f"      sizes: {' | '.join(sizes)}")
+        print(f"      link: {it.get('product_link')}")
+    if not items:
+        print(
+            f"  (none at >= {min_color_discount}%. The current sale may be mostly"
+            " lighter discounts — try a lower threshold, e.g. --min-color-discount 30)"
+        )
+    print(f"\n[local] wrote preview HTML to {out_path}")
+
+    if open_browser:
+        import webbrowser
+
+        webbrowser.open("file://" + os.path.abspath(out_path))
+    return items
+
+
 if __name__ == "__main__":
+    # 进度日志按行刷新，这样即使把输出重定向到文件/管道，也能实时看到抓取进度
+    # （否则 Python 对非 TTY 输出会按块缓冲，长时间一片空白）。
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except Exception:
+        pass
+
     arg_parser = argparse.ArgumentParser(description="Patagonia web-specials discount checker")
     arg_parser.add_argument(
         "--html",
@@ -1509,12 +1928,51 @@ if __name__ == "__main__":
     arg_parser.add_argument(
         "--out",
         metavar="FILE",
-        help="With --html, also write a preview HTML of the parsed products.",
+        help="Output HTML path (with --html: preview of parsed products;"
+        " with --local: the local result page).",
+    )
+    arg_parser.add_argument(
+        "--local",
+        action="store_true",
+        help="Live scrape from this machine and save results to a local HTML file."
+        " No Gist/Telegram/state, no credentials needed (run from a home network).",
+    )
+    arg_parser.add_argument(
+        "--min-color-discount",
+        type=int,
+        default=50,
+        metavar="PCT",
+        help="Keep only colors discounted at least this %% (default: 50). Used by --local.",
+    )
+    arg_parser.add_argument(
+        "--with-sizes",
+        action="store_true",
+        help="With --local, also collect per-color sizes for each product"
+        " (accurate but slow: opens a tab per product, takes minutes).",
+    )
+    arg_parser.add_argument(
+        "--open",
+        action="store_true",
+        help="With --local, open the generated HTML in your browser when done.",
     )
     args, _ = arg_parser.parse_known_args()
 
     if args.html:
         run_offline(args.html, output_html=args.out)
+    elif args.local:
+        try:
+            run_local(
+                min_color_discount=args.min_color_discount,
+                out_path=args.out or "discounted_products.html",
+                open_browser=args.open,
+                fetch_sizes=args.with_sizes,
+            )
+        finally:
+            if driver is not None:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
     else:
         try:
             main()

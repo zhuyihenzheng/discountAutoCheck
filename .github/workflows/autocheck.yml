@@ -2,10 +2,13 @@ name: Upload Discounted Products to Gist
 
 on:
   workflow_dispatch:
-  schedule:
-    # UTC: 01:05 / 07:05 / 13:05 / 19:05
-    # JST: 10:05 / 16:05 / 22:05 / 04:05
-    - cron: "5 1,7,13,19 * * *"
+  # 定时触发已停用：反复自动抓取导致 runner IP 被 Akamai 风控标记，
+  # PDP（甚至列表页）开始返回 bot-failover 拦截页、抓不到尺码。
+  # 需要恢复时取消下面注释即可（注意 schedule 以默认分支 main 上的版本为准）。
+  # schedule:
+  #   # UTC: 01:05 / 07:05 / 13:05 / 19:05
+  #   # JST: 10:05 / 16:05 / 22:05 / 04:05
+  #   - cron: "5 1,7,13,19 * * *"
 
 jobs:
   upload:
