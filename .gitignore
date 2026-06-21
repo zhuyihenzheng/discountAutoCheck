@@ -3,3 +3,4 @@ __pycache__/
 .venv/
 browser_ws.html
 discounted_products.html
+akamai_cookies.json

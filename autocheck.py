@@ -1,5 +1,6 @@
 import argparse
 import json
+import random
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -52,6 +53,10 @@ COLOR_SELECTORS = (
     ".product-attribute__color button",
     ".product-attribute__color label",
 )
+
+# 温和化：把上次成功通过 bot 墙的会话 cookie（Akamai _abck / bm_* 等）存到本地，
+# 下次复用，减少每次都从零触发挑战。best-effort——cookie 过期就被重新挑战，不会更糟。
+COOKIE_FILE = "akamai_cookies.json"
 
 PRODUCT_GIST_DESCRIPTION = "Patagonia Discounted Products"
 PRODUCT_GIST_FILE = "discounted_products.html"
@@ -204,6 +209,46 @@ def _get_driver():
         print(f"[driver] stealth script failed: {exc}")
 
     return driver
+
+
+def _save_cookies(drv):
+    """Persist current cookies so the next run can warm-start a session that
+    already cleared the bot wall. Best-effort: stale cookies just get re-challenged."""
+    try:
+        cookies = drv.get_cookies()
+        with open(COOKIE_FILE, "w", encoding="utf-8") as f:
+            json.dump(cookies, f)
+        print(f"[cookies] saved {len(cookies)} cookies")
+    except Exception as exc:
+        print(f"[cookies] save failed: {exc}")
+
+
+def _load_cookies(drv):
+    """Apply saved cookies onto the driver. The driver must already be on the
+    target domain (Selenium rejects add_cookie otherwise). Returns True if any
+    cookie was applied."""
+    if not os.path.exists(COOKIE_FILE):
+        return False
+    try:
+        with open(COOKIE_FILE, "r", encoding="utf-8") as f:
+            cookies = json.load(f)
+    except Exception as exc:
+        print(f"[cookies] load failed: {exc}")
+        return False
+    applied = 0
+    for c in cookies:
+        # selenium 对部分字段挑剔：去掉 sameSite，expiry 必须是 int。
+        c.pop("sameSite", None)
+        if isinstance(c.get("expiry"), float):
+            c["expiry"] = int(c["expiry"])
+        try:
+            drv.add_cookie(c)
+            applied += 1
+        except Exception:
+            continue
+    if applied:
+        print(f"[cookies] applied {applied}/{len(cookies)} saved cookies")
+    return applied > 0
 
 
 def _num(s):
@@ -1413,7 +1458,7 @@ def _expand_listing(drv, wait_timeout, max_iterations=300):
         if button is not None:
             try:
                 drv.execute_script("arguments[0].scrollIntoView({block: 'center'});", button)
-                time.sleep(0.3)
+                time.sleep(0.3 + random.uniform(0.1, 0.6))  # jitter：避免固定点击节奏
                 drv.execute_script("arguments[0].click();", button)
             except Exception as exc:
                 print(f"[expand] click error: {exc}")
@@ -1477,17 +1522,30 @@ def fetch_discounted_products(min_color_discount=50, fetch_sizes=True):
     wait_selector = "[data-pid]"
 
     url = f"{BASE}/shop/web-specials?sz={page_size}"
+
+    # 温和化（warm start）：先访问站点根并复用上次成功留下的 Akamai cookie，减少每次都
+    # 从零触发 bot 挑战。add_cookie 要求已在目标域上，所以先 get(BASE) 再加载 cookie。
+    try:
+        drv.get(BASE + "/")
+        time.sleep(1.0 + random.uniform(0.0, 1.5))
+        _load_cookies(drv)
+    except Exception as exc:
+        print(f"[round1] cookie warm-up skipped: {exc}")
+
     full_html = None
     max_attempts = 3
     for attempt in range(1, max_attempts + 1):
         print(f"[round1] attempt {attempt}/{max_attempts}: fetching {url}")
         if attempt > 1:
-            # 重新发起请求前清掉可能携带的「已被标记」cookie，并退避一会儿。
+            # 重新发起请求前清掉可能携带的「已被标记」cookie，并带 jitter 退避一会儿。
             try:
                 drv.delete_all_cookies()
             except Exception:
                 pass
-            time.sleep(5 * attempt)
+            time.sleep(5 * attempt + random.uniform(0.0, 4.0))
+        else:
+            # 首次请求前也加一点随机停顿，避免固定时序特征。
+            time.sleep(random.uniform(0.5, 2.0))
         try:
             drv.get(url)
         except Exception as exc:
@@ -1509,6 +1567,8 @@ def fetch_discounted_products(min_color_discount=50, fetch_sizes=True):
             print(f"[round1] attempt {attempt}: bot-failover page detected, retrying")
             continue
 
+        # 通过了 bot 墙：存下这套有效 cookie 供下次 warm start 复用。
+        _save_cookies(drv)
         full_html = _expand_listing(drv, wait_timeout)
         break
 
