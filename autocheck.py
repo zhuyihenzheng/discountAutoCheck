@@ -78,8 +78,52 @@ def _ensure_selenium():
     TimeoutException = _TimeoutException
 
 
+class BotBlockedError(RuntimeError):
+    """Raised when the site serves Akamai's bot-failover page instead of products.
+
+    Distinguishes "the site blocked our scraper" (0 items because of a wall) from
+    "the sale genuinely has no items" (0 items because nothing is discounted), so
+    the caller does not wipe the gist / saved state with a false empty result.
+    """
+
+
+# Markers of Akamai's "Hang Tight! Routing to checkout..." / bot-failover page.
+# When these show up, the real product grid never rendered and any 0件 is a block.
+_BOT_BLOCK_MARKERS = (
+    "hang tight",
+    "sit tight",
+    "routing to checkout",
+    "botfailover",
+    "waitroomform",
+    "現在ウェブサイトがご利用いただけません",
+)
+
+
+def _looks_blocked(drv):
+    """True if the current page is Akamai's bot/waiting-room failover, not content."""
+    try:
+        title = (drv.title or "").lower()
+    except Exception:
+        title = ""
+    if any(marker in title for marker in ("hang tight", "sit tight", "routing to checkout")):
+        return True
+    try:
+        head = (drv.page_source or "")[:6000].lower()
+    except Exception:
+        head = ""
+    return any(marker in head for marker in _BOT_BLOCK_MARKERS)
+
+
 def _get_driver():
-    """Create (once) and return the headless Chrome driver."""
+    """Create (once) and return a headless Chrome driver tuned to look human.
+
+    patagonia.jp sits behind Akamai Bot Manager. A stock Selenium session (old
+    user-agent, ``navigator.webdriver === true``, the "enable-automation" switch,
+    a ``HeadlessChrome`` UA token) is trivially fingerprinted and served the
+    bot-failover page instead of products. We strip those tells so the grid has a
+    chance to render. This does not defeat IP-reputation checks, but it removes
+    the cheap browser-side signals that flag the request before IP is even weighed.
+    """
     global driver
     if driver is not None:
         return driver
@@ -88,11 +132,46 @@ def _get_driver():
     options.add_argument("--headless=new")  # 无头模式，后台运行
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("start-maximized")          # 最大化窗口
-    options.add_argument("disable-infobars")
+    options.add_argument("--window-size=1280,1800")
     options.add_argument("--disable-extensions")
-    options.add_argument(f"user-agent={DEFAULT_USER_AGENT}")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("--lang=ja-JP")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
+    options.add_experimental_option("prefs", {"intl.accept_languages": "ja-JP,ja,en-US,en"})
     driver = webdriver.Chrome(options=options)
+
+    # 用真实 Chrome 版本号覆盖 UA（去掉 HeadlessChrome 标记），避免 UA 版本对不上 /
+    # 出现无头特征而被反爬识别。运行时读取真实 navigator.userAgent，再做最小修补。
+    try:
+        real_ua = driver.execute_script("return navigator.userAgent") or DEFAULT_USER_AGENT
+    except Exception:
+        real_ua = DEFAULT_USER_AGENT
+    clean_ua = real_ua.replace("HeadlessChrome", "Chrome")
+    try:
+        driver.execute_cdp_cmd(
+            "Network.setUserAgentOverride",
+            {"userAgent": clean_ua, "acceptLanguage": "ja-JP,ja;q=0.9,en;q=0.8"},
+        )
+    except Exception as exc:
+        print(f"[driver] UA override failed: {exc}")
+
+    # 隐藏 webdriver / 补全 languages、plugins、window.chrome 等指纹。
+    try:
+        driver.execute_cdp_cmd(
+            "Page.addScriptToEvaluateOnNewDocument",
+            {
+                "source": (
+                    "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
+                    "Object.defineProperty(navigator,'languages',{get:()=>['ja-JP','ja','en-US','en']});"
+                    "Object.defineProperty(navigator,'plugins',{get:()=>[1,2,3,4,5]});"
+                    "window.chrome=window.chrome||{runtime:{}};"
+                )
+            },
+        )
+    except Exception as exc:
+        print(f"[driver] stealth script failed: {exc}")
+
     return driver
 
 
@@ -1341,22 +1420,49 @@ def fetch_discounted_products():
     wait_selector = "[data-pid]"
 
     url = f"{BASE}/shop/web-specials?sz={page_size}"
-    print(f"[round1] fetching {url}")
-    try:
-        drv.get(url)
-    except Exception as exc:
-        print(f"[round1] navigation error: {exc}")
-        return [], render_products_html([])
+    full_html = None
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        print(f"[round1] attempt {attempt}/{max_attempts}: fetching {url}")
+        if attempt > 1:
+            # 重新发起请求前清掉可能携带的「已被标记」cookie，并退避一会儿。
+            try:
+                drv.delete_all_cookies()
+            except Exception:
+                pass
+            time.sleep(5 * attempt)
+        try:
+            drv.get(url)
+        except Exception as exc:
+            print(f"[round1] attempt {attempt}: navigation error: {exc}")
+            continue
 
-    try:
-        WebDriverWait(drv, wait_timeout).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, wait_selector))
-        )
-    except TimeoutException:
-        print("[round1] wait timeout (no [data-pid])")
-        return [], render_products_html([])
+        try:
+            WebDriverWait(drv, wait_timeout).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, wait_selector))
+            )
+        except TimeoutException:
+            if _looks_blocked(drv):
+                print(f"[round1] attempt {attempt}: blocked by Akamai bot-failover page")
+            else:
+                print(f"[round1] attempt {attempt}: wait timeout (no [data-pid])")
+            continue
 
-    full_html = _expand_listing(drv, wait_timeout)
+        if _looks_blocked(drv):
+            print(f"[round1] attempt {attempt}: bot-failover page detected, retrying")
+            continue
+
+        full_html = _expand_listing(drv, wait_timeout)
+        break
+
+    if full_html is None:
+        if _looks_blocked(drv):
+            raise BotBlockedError(
+                f"Akamai bot-failover page returned for all {max_attempts} attempts;"
+                " 0件 here means we were blocked, not that the sale is empty"
+            )
+        print(f"[round1] no [data-pid] after {max_attempts} attempts, giving up")
+        return [], render_products_html([])
     raw_total = len(collect_tile_pids(full_html))
 
     page_items = parse_listing_html(full_html, min_discount=min_discount)
@@ -1517,7 +1623,15 @@ def main():
     previous_state = load_previous_state()
     previous_snapshot = previous_state.get("snapshot") or []
 
-    items, html_content = fetch_discounted_products()
+    try:
+        items, html_content = fetch_discounted_products()
+    except BotBlockedError as exc:
+        # 被 Akamai 拦截时拿到的是 0 件假结果。绝不能用空列表覆盖 Gist / state，
+        # 否则会清空用户实际看到的清单，并在下次恢复时误报一堆「新增」。
+        print(f"[blocked] {exc}")
+        print("[blocked] keeping previous gist/state; not uploading empty result or sending telegram")
+        return
+
     gist_url = upload_to_gist(html_content)
 
     current_snapshot = _build_state_snapshot(items)
